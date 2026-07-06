@@ -13,7 +13,6 @@
 *.dwo
 *.dwo.*
 *.mod
-build/
 
 # Compilation database
 compile_commands.json
