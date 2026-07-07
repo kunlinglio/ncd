@@ -109,7 +109,8 @@ pub fn read_packet(frame_buf: &mut VecDeque<Frame>) -> Result<Option<Packet>, Er
         return Ok(None);
     }
 
-    let Some(res) = frames_to_packet(&frame_buf.make_contiguous())? else {
+    // TODO: Avoid O(n) make_contiguous() copy
+    let Some(res) = frames_to_packet(frame_buf.make_contiguous())? else {
         return Ok(None);
     };
     let (consumed, packet) = res;

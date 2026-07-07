@@ -1,4 +1,4 @@
-//! Network Character Device Protocol implementation.
+//! Network Character Device Protocol implementation based on tokio runtime.
 
 mod config;
 mod connection;
