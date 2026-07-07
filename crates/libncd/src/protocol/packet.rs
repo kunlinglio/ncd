@@ -1,101 +1,8 @@
-//! # Packet Structure
-//! 0                  16      24        32 bit
-//! |       Magic Number       | Version |
-//! |  Payload Length  |  Flag |  Type   |
-//! |         Payload (variable)         |
-
-use super::{MAGIC_NUMBER, VERSION};
 use crate::error::Error;
 
-/// Packet represents a single packet in the Network Character Device Protocol.
-#[derive(Debug)]
-pub struct Packet {
-    // Magic Number and Version are handled by encoding/decoding functions
-    pub flag: Flag,
-    pub typed_payload: TypedPayload,
-}
-const HEADER_SIZE_BYTE: usize = 8;
-
-/// Sequence flags.
-/// If the user request is larger than the maximum payload size, the request will be split into multiple packets.
-/// - The first packet: More (1)
-/// - Middle packets: More (1)
-/// - The Last packet: End (0)
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-pub enum Flag {
-    End = 0x00,
-    More = 0x01,
-}
-
-impl TryFrom<u8> for Flag {
-    type Error = Error;
-    fn try_from(v: u8) -> Result<Self, Error> {
-        match v {
-            0x00 => Ok(Flag::End),
-            0x01 => Ok(Flag::More),
-            _ => Err(Error::PacketDecodeError(format!(
-                "Invalid flag value: {}",
-                v
-            ))),
-        }
-    }
-}
-
-impl Packet {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(HEADER_SIZE_BYTE + self.typed_payload.length());
-        buf.extend_from_slice(MAGIC_NUMBER); // 24 bit
-        buf.extend_from_slice(&VERSION.to_be_bytes()); // 8 bit
-        buf.extend_from_slice(&self.typed_payload.length().to_be_bytes()); // 16 bit
-        buf.push(self.flag as u8); // 8 bit
-        buf.push(self.typed_payload.tag()); // 8 bit
-        assert_eq!(buf.len(), HEADER_SIZE_BYTE);
-
-        buf.extend_from_slice(&self.typed_payload.encode_body());
-        buf
-    }
-
-    pub fn decode(src: &[u8]) -> Result<Self, Error> {
-        if src.len() < HEADER_SIZE_BYTE {
-            return Err(Error::PacketDecodeError("Source data is too short".into()));
-        }
-        let magic = &src[0..3];
-        if magic != MAGIC_NUMBER {
-            return Err(Error::PacketDecodeError(format!(
-                "Invalid magic number: {:?}",
-                magic
-            )));
-        }
-        let version = src[3];
-        if version != VERSION {
-            return Err(Error::PacketDecodeError(format!(
-                "Invalid version: {}",
-                version
-            )));
-        }
-        let length = u16::from_be_bytes([src[4], src[5]]) as usize;
-        let flag = src[6];
-        let tag = src[7];
-        if src.len() < HEADER_SIZE_BYTE + length {
-            return Err(Error::PacketDecodeError(
-                "Source data is too short for payload".into(),
-            ));
-        }
-        let payload = &src[HEADER_SIZE_BYTE..HEADER_SIZE_BYTE + length];
-
-        let typed_payload = TypedPayload::decode_body(tag, payload)?;
-
-        Ok(Packet {
-            flag: Flag::try_from(flag)?,
-            typed_payload,
-        })
-    }
-}
-
-#[repr(u8)]
-#[derive(Debug)]
-pub enum TypedPayload {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Packet {
     ControlHello = 0x01,
     ControlClose = 0x02,
     ControlKeepAlive = 0x03,
@@ -104,8 +11,8 @@ pub enum TypedPayload {
     Data(Vec<u8>) = 0x06,
 }
 
-impl TypedPayload {
-    pub fn tag(&self) -> u8 {
+impl Packet {
+    fn tag(&self) -> u8 {
         match self {
             Self::ControlHello => 0x01,
             Self::ControlClose => 0x02,
@@ -116,13 +23,16 @@ impl TypedPayload {
         }
     }
 
-    pub fn encode_body(&self) -> Vec<u8> {
-        match self {
+    /// TODO: Optimize memory allocation
+    pub fn encode_body(&self) -> (u8, Vec<u8>) {
+        let tag = self.tag();
+        let payload = match self {
             Self::ControlHello | Self::ControlClose | Self::ControlKeepAlive => vec![],
             Self::ControlPing { id } => id.to_be_bytes().to_vec(),
             Self::ControlPong { id } => id.to_be_bytes().to_vec(),
             Self::Data(data) => data.clone(),
-        }
+        };
+        (tag, payload)
     }
 
     pub fn decode_body(tag: u8, src: &[u8]) -> Result<Self, Error> {
@@ -162,5 +72,93 @@ impl TypedPayload {
             Self::ControlPing { .. } | Self::ControlPong { .. } => 4,
             Self::Data(data) => data.len(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_hello() {
+        let pkt = Packet::ControlHello;
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_close() {
+        let pkt = Packet::ControlClose;
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_keepalive() {
+        let pkt = Packet::ControlKeepAlive;
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_ping() {
+        let pkt = Packet::ControlPing { id: 42 };
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_pong() {
+        let pkt = Packet::ControlPong { id: 99 };
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_data() {
+        let pkt = Packet::Data(b"hello world".to_vec());
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_empty_data() {
+        let pkt = Packet::Data(vec![]);
+        let (ty, body) = pkt.encode_body();
+        let decoded = Packet::decode_body(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn decode_body_rejects_short_ping() {
+        let err = Packet::decode_body(0x04, &[0x00, 0x00, 0x00]).unwrap_err();
+        assert!(
+            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("ControlPing")),
+            "expected ControlPing truncation error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_body_rejects_short_pong() {
+        let err = Packet::decode_body(0x05, &[0x00]).unwrap_err();
+        assert!(
+            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("ControlPong")),
+            "expected ControlPong truncation error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_body_rejects_unknown_tag() {
+        let err = Packet::decode_body(0xFF, &[]).unwrap_err();
+        assert!(
+            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("Unknown tag")),
+            "expected unknown tag error, got {err:?}"
+        );
     }
 }
