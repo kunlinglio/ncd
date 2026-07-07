@@ -2,17 +2,7 @@
 .DS_Store
 
 # Kernel module build artifacts
-*.o
-*.ko
-*.mod.c
-*.mod.o
-*.order
-*.symvers
-*.cmd
-*.a
-*.dwo
-*.dwo.*
-*.mod
+build/
 
 # Compilation database
 compile_commands.json
