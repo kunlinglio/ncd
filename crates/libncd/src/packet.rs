@@ -24,7 +24,7 @@ impl Packet {
     }
 
     /// TODO: Optimize memory allocation
-    pub fn encode_body(&self) -> (u8, Vec<u8>) {
+    pub(crate) fn encode_body(&self) -> (u8, Vec<u8>) {
         let tag = self.tag();
         let payload = match self {
             Self::ControlHello | Self::ControlClose | Self::ControlKeepAlive => vec![],
@@ -35,7 +35,7 @@ impl Packet {
         (tag, payload)
     }
 
-    pub fn decode_body(tag: u8, src: &[u8]) -> Result<Self, Error> {
+    pub(crate) fn decode_body(tag: u8, src: &[u8]) -> Result<Self, Error> {
         let typed_payload = match tag {
             0x01 => Ok(Self::ControlHello),
             0x02 => Ok(Self::ControlClose),
@@ -66,7 +66,7 @@ impl Packet {
         Ok(typed_payload)
     }
 
-    pub fn length(&self) -> usize {
+    pub(crate) fn length(&self) -> usize {
         match self {
             Self::ControlHello | Self::ControlClose | Self::ControlKeepAlive => 0,
             Self::ControlPing { .. } | Self::ControlPong { .. } => 4,

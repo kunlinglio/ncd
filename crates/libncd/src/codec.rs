@@ -77,7 +77,7 @@ fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Error> 
     Ok(Some((consumed_frames, packet)))
 }
 
-fn write_packet<W: Write>(writer: &mut W, packet: &Packet) -> Result<(), Error> {
+pub fn write_packet<W: Write>(writer: &mut W, packet: &Packet) -> Result<(), Error> {
     let frames = packet_to_frames(packet);
     for frame in frames {
         let bytes = frame.encode();

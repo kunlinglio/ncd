@@ -7,6 +7,10 @@ name = "libncd"
 version = "0.1.0"
 
 [[package]]
+name = "libncd-runtime"
+version = "0.1.0"
+
+[[package]]
 name = "ncd"
 version = "0.1.0"
 dependencies = [

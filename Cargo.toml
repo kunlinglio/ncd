@@ -1,5 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/libncd", "crates/ncdd", "crates/ncd"]
+members = [
+    "crates/libncd",
+    "crates/ncdd",
+    "crates/libncd-runtime",
+    "crates/ncd",
+]
 
 [workspace.dependencies]
