@@ -8,5 +8,12 @@ members = [
 ]
 
 [workspace.dependencies]
-tokio = "1.52.3"
 thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = [
+    "net",
+    "io-util",
+    "sync",
+    "macros",
+    "rt-multi-thread",
+    "time",
+] }

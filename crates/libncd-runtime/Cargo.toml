@@ -5,10 +5,5 @@ edition = "2024"
 
 [dependencies]
 libncd = { path = "../libncd" }
-tokio = { workspace = true, features = [
-    "net",
-    "io-util",
-    "sync",
-    "macros",
-    "rt-multi-thread",
-] }
+tokio = { workspace = true }
+thiserror = { workspace = true }
