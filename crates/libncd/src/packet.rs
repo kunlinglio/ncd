@@ -1,16 +1,18 @@
 use crate::error::{Error, PacketDecodeError};
 
 const CONTROL_HELLO_TAG: u8 = 0x01;
-const CONTROL_CLOSE_TAG: u8 = 0x02;
-const CONTROL_KEEP_ALIVE_TAG: u8 = 0x03;
-const CONTROL_PING_TAG: u8 = 0x04;
-const CONTROL_PONG_TAG: u8 = 0x05;
-const DATA_TAG: u8 = 0x06;
+const CONTROL_HELLO_ACK_TAG: u8 = 0x02;
+const CONTROL_CLOSE_TAG: u8 = 0x03;
+const CONTROL_KEEP_ALIVE_TAG: u8 = 0x04;
+const CONTROL_PING_TAG: u8 = 0x05;
+const CONTROL_PONG_TAG: u8 = 0x06;
+const DATA_TAG: u8 = 0x07;
 
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Packet {
-    ControlHello = CONTROL_HELLO_TAG,
+    ControlHello { keep_alive_interval_ms: u32 } = CONTROL_HELLO_TAG,
+    ControlHelloAck { keep_alive_interval_ms: u32 } = CONTROL_HELLO_ACK_TAG,
     ControlClose = CONTROL_CLOSE_TAG,
     ControlKeepAlive = CONTROL_KEEP_ALIVE_TAG,
     ControlPing { id: u32 } = CONTROL_PING_TAG,
@@ -21,7 +23,8 @@ pub enum Packet {
 impl Packet {
     fn tag(&self) -> u8 {
         match self {
-            Self::ControlHello => CONTROL_HELLO_TAG,
+            Self::ControlHello { .. } => CONTROL_HELLO_TAG,
+            Self::ControlHelloAck { .. } => CONTROL_HELLO_ACK_TAG,
             Self::ControlClose => CONTROL_CLOSE_TAG,
             Self::ControlKeepAlive => CONTROL_KEEP_ALIVE_TAG,
             Self::ControlPing { .. } => CONTROL_PING_TAG,
@@ -32,8 +35,10 @@ impl Packet {
 
     fn fixed_length(tag: u8) -> Option<usize> {
         match tag {
-            CONTROL_HELLO_TAG | CONTROL_CLOSE_TAG | CONTROL_KEEP_ALIVE_TAG => Some(0),
-            CONTROL_PING_TAG | CONTROL_PONG_TAG => Some(4),
+            CONTROL_CLOSE_TAG | CONTROL_KEEP_ALIVE_TAG => Some(0),
+            CONTROL_HELLO_TAG | CONTROL_HELLO_ACK_TAG | CONTROL_PING_TAG | CONTROL_PONG_TAG => {
+                Some(4)
+            }
             DATA_TAG => None,
             _ => None,
         }
@@ -41,7 +46,8 @@ impl Packet {
 
     pub(crate) fn length(&self) -> usize {
         match self {
-            Self::ControlHello
+            Self::ControlHello { .. }
+            | Self::ControlHelloAck { .. }
             | Self::ControlClose
             | Self::ControlKeepAlive
             | Self::ControlPing { .. }
@@ -57,7 +63,13 @@ impl Packet {
     pub(crate) fn encode(&self) -> (u8, Vec<u8>) {
         let tag = self.tag();
         let payload = match self {
-            Self::ControlHello | Self::ControlClose | Self::ControlKeepAlive => vec![],
+            Self::ControlHello {
+                keep_alive_interval_ms,
+            } => keep_alive_interval_ms.to_be_bytes().to_vec(),
+            Self::ControlHelloAck {
+                keep_alive_interval_ms,
+            } => keep_alive_interval_ms.to_be_bytes().to_vec(),
+            Self::ControlClose | Self::ControlKeepAlive => vec![],
             Self::ControlPing { id } => id.to_be_bytes().to_vec(),
             Self::ControlPong { id } => id.to_be_bytes().to_vec(),
             Self::Data(data) => data.clone(),
@@ -78,7 +90,9 @@ impl Packet {
             }
         }
         let typed_payload = match tag {
-            CONTROL_HELLO_TAG => Ok(Self::ControlHello),
+            CONTROL_HELLO_TAG => Ok(Self::ControlHello {
+                keep_alive_interval_ms: u32::from_be_bytes([src[0], src[1], src[2], src[3]]),
+            }),
             CONTROL_CLOSE_TAG => Ok(Self::ControlClose),
             CONTROL_KEEP_ALIVE_TAG => Ok(Self::ControlKeepAlive),
             CONTROL_PING_TAG => Ok(Self::ControlPing {
@@ -100,7 +114,9 @@ mod tests {
 
     #[test]
     fn roundtrip_hello() {
-        let pkt = Packet::ControlHello;
+        let pkt = Packet::ControlHello {
+            keep_alive_interval_ms: 1000,
+        };
         let (ty, body) = pkt.encode();
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);

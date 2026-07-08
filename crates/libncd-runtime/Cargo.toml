@@ -7,3 +7,4 @@ edition = "2024"
 libncd = { path = "../libncd" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+bytes = "1.12.0"

@@ -44,7 +44,7 @@ impl TryFrom<u8> for Flag {
 
 impl Frame {
     /// TODO: Optimize memory allocation
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(HEADER_SIZE + self.payload.len());
         buf.extend_from_slice(MAGIC_NUMBER); // 24 bit
         buf.extend_from_slice(&VERSION.to_be_bytes()); // 8 bit
@@ -64,7 +64,7 @@ impl Frame {
         buf
     }
 
-    pub(crate) fn decode(src: &[u8]) -> Result<Self, Error> {
+    pub fn decode(src: &[u8]) -> Result<Self, Error> {
         let Some((ty, flag, length)) = Self::peek_head(src)? else {
             return Err(FrameDecodeError::DataShorterThanHeader {
                 expected: HEADER_SIZE,
@@ -87,7 +87,7 @@ impl Frame {
     }
 
     /// Returns: (type, flag, payload length)
-    pub(crate) fn peek_head(src: &[u8]) -> Result<Option<(u8, Flag, usize)>, Error> {
+    pub fn peek_head(src: &[u8]) -> Result<Option<(u8, Flag, usize)>, Error> {
         if src.len() < HEADER_SIZE {
             return Ok(None);
         }

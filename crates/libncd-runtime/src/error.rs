@@ -1,66 +1,19 @@
-use std::fmt;
+use std::net::SocketAddr;
+use std::time::Duration;
 
-use crate::connection::ConnState;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    /// An error from the underlying libncd protocol layer
-    /// (frame decode failures, magic number mismatches, etc.).
-    Protocol(libncd::error::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 
-    /// An I/O error from the TCP stream (connection reset, etc.).
-    Io(std::io::Error),
+    #[error("Connect timeout after {timeout:?} to {addr}")]
+    ConnectTimeout { addr: SocketAddr, timeout: Duration },
 
-    /// The operation cannot proceed because the connection is in the
-    /// wrong lifecycle state.
-    InvalidState {
-        current: ConnState,
-        expected: &'static str,
-    },
+    #[error("Protocol error: {0}")]
+    ProtocolError(#[from] libncd::error::Error),
 
-    /// The peer sent ControlClose or the TCP stream returned EOF.
+    #[error("Connection closed by peer")]
     ConnectionClosed,
-
-    /// The initial handshake with the daemon failed.
-    HandshakeFailed(String),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Protocol(e) => write!(f, "Protocol error: {}", e),
-            Error::Io(e) => write!(f, "IO error: {}", e),
-            Error::InvalidState { current, expected } => {
-                write!(
-                    f,
-                    "Invalid connection state: {:?} (expected: {})",
-                    current, expected
-                )
-            }
-            Error::ConnectionClosed => write!(f, "Connection closed"),
-            Error::HandshakeFailed(msg) => write!(f, "Handshake failed: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Protocol(e) => Some(e),
-            Error::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Io(e)
-    }
-}
-
-impl From<libncd::error::Error> for Error {
-    fn from(e: libncd::error::Error) -> Self {
-        Error::Protocol(e)
-    }
 }

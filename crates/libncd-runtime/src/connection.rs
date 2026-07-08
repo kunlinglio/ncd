@@ -1,269 +1,162 @@
 use std::collections::VecDeque;
-use std::io::Cursor;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
+use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 
-use libncd::frame::Frame;
+use libncd::frame::{self, Frame};
 use libncd::packet::Packet;
-use libncd::{read_frame, read_packet, write_packet};
+use libncd::{frames_to_packet, packet_to_frames};
 
 use crate::error::Error;
 
-/// Connection lifecycle states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnRole {
+    /// Host endpoint of NCD protocol, listening for TCP connections
+    Host,
+    /// Device endpoint of NCD protocol, connecting to a remote host
+    Device,
+}
+
 #[repr(u8)]
-pub enum ConnState {
-    Disconnected = 0,
-    Connecting = 1,
-    Handshaking = 2,
-    Connected = 3,
-    Closing = 4,
-    Closed = 5,
+enum ConnState {
+    /// TCP connection established, waiting for handshaking
+    Connecting,
+    /// Handshake complete, connection is fully established
+    Connected,
+    /// Stop reading/writing, send ControlClose and shutdown the TCP stream
+    Closing,
+    /// Connection is closed, no further operations are allowed
+    Closed,
 }
 
-impl ConnState {
-    fn from_u8(v: u8) -> Self {
-        match v {
-            0 => ConnState::Disconnected,
-            1 => ConnState::Connecting,
-            2 => ConnState::Handshaking,
-            3 => ConnState::Connected,
-            4 => ConnState::Closing,
-            5 => ConnState::Closed,
-            _ => ConnState::Disconnected,
-        }
-    }
-}
-
-/// Mutable state protected by a single tokio Mutex.
-struct Inner {
-    stream: TcpStream,
-    raw: Vec<u8>,
-    frames: VecDeque<Frame>,
-    /// Leftover bytes from a Data payload that was larger than the user's
-    /// read buffer. Served first on the next read() call.
-    leftover: Vec<u8>,
-}
-
-/// A connection to an NCD daemon.
-///
-/// Created via [`open()`](crate::open), consumed by [`close()`](crate::close).
-/// `read()` and `write()` take `&Connection` — interior mutability is
-/// handled by a tokio mutex internally.
 pub struct Connection {
-    inner: Mutex<Inner>,
-    state: AtomicU8,
+    stream: TcpStream,
+    byte_buffer: BytesMut,
+    frame_buffer: VecDeque<Frame>,
+    packet_buffer: VecDeque<Packet>,
+    state: ConnState,
     peer_addr: SocketAddr,
+    role: ConnRole,
 }
-
-// ── Inner helpers ──────────────────────────────────────────────
-
-impl Inner {
-    /// Encode and write a single packet to the stream.
-    async fn send_packet(&mut self, packet: &Packet) -> Result<(), Error> {
-        let mut cursor = Cursor::new(Vec::new());
-        write_packet(&mut cursor, packet)?;
-        self.stream.write_all(&cursor.into_inner()).await?;
-        Ok(())
-    }
-
-    /// Read whatever bytes are available on the stream and decode them
-    /// into frames. Returns `Ok(false)` on EOF.
-    async fn fill_frames(&mut self) -> Result<bool, Error> {
-        let mut tmp = [0u8; 8192];
-        let n = self.stream.read(&mut tmp).await?;
-        if n == 0 {
-            return Ok(false); // EOF
-        }
-
-        self.raw.extend_from_slice(&tmp[..n]);
-
-        let consumed = {
-            let mut cursor = Cursor::new(&self.raw[..]);
-            while let Some(frame) = read_frame(&mut cursor)? {
-                self.frames.push_back(frame);
-            }
-            cursor.position() as usize
-        };
-        self.raw.drain(..consumed);
-
-        Ok(true)
-    }
-}
-
-// ── Connection ─────────────────────────────────────────────────
 
 impl Connection {
-    /// Establish a TCP connection and perform the NCD ControlHello handshake.
-    pub(crate) async fn connect(addr: &str) -> Result<Self, Error> {
-        let stream = TcpStream::connect(addr).await?;
-        let peer_addr = stream.peer_addr()?;
-
-        let conn = Connection {
-            inner: Mutex::new(Inner {
-                stream,
-                raw: Vec::new(),
-                frames: VecDeque::new(),
-                leftover: Vec::new(),
-            }),
-            state: AtomicU8::new(ConnState::Connecting as u8),
+    pub async fn connect(
+        to_addr: IpAddr,
+        to_port: u16,
+        connect_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let peer_addr = SocketAddr::new(to_addr, to_port);
+        let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(peer_addr))
+            .await
+            .map_err(|_| Error::ConnectTimeout {
+                addr: peer_addr,
+                timeout: connect_timeout,
+            })?
+            .map_err(Error::from)?;
+        let mut conn = Self {
+            stream,
+            byte_buffer: BytesMut::new(),
+            frame_buffer: VecDeque::new(),
+            packet_buffer: VecDeque::new(),
+            state: ConnState::Connecting,
             peer_addr,
+            role: ConnRole::Device,
         };
-
-        // Phase 1: send ControlHello
-        {
-            let mut inner = conn.inner.lock().await;
-            inner.send_packet(&Packet::ControlHello).await?;
-            conn.state
-                .store(ConnState::Handshaking as u8, Ordering::Release);
-        }
-
-        // Phase 2: wait for ControlHello reply
-        {
-            let mut inner = conn.inner.lock().await;
-            loop {
-                if let Some(packet) = read_packet(&mut inner.frames)? {
-                    match packet {
-                        Packet::ControlHello => break, // handshake complete
-                        other => {
-                            return Err(Error::HandshakeFailed(format!(
-                                "expected ControlHello, got {:?}",
-                                other
-                            )));
-                        }
-                    }
-                }
-
-                if !inner.fill_frames().await? {
-                    return Err(Error::HandshakeFailed(
-                        "connection closed during handshake".into(),
-                    ));
-                }
-            }
-        }
-
-        conn.state
-            .store(ConnState::Connected as u8, Ordering::Release);
+        conn.handshake().await?;
         Ok(conn)
     }
 
-    /// Read data from the connection into `buf`.
-    ///
-    /// Returns the number of bytes copied. Handles control packets
-    /// (Ping→Pong, Close, KeepAlive) transparently.
-    pub(crate) async fn read_data(&self, buf: &mut [u8]) -> Result<usize, Error> {
-        let mut inner = self.inner.lock().await;
+    pub async fn listen(on_addr: IpAddr, on_port: u16) -> Result<Self, Error> {
+        let peer_addr = SocketAddr::new(on_addr, on_port);
+        let stream = tokio::net::TcpListener::bind(peer_addr)
+            .await
+            .map_err(Error::from)?
+            .accept()
+            .await
+            .map_err(Error::from)?
+            .0;
+        let mut conn = Self {
+            stream,
+            byte_buffer: BytesMut::new(),
+            frame_buffer: VecDeque::new(),
+            packet_buffer: VecDeque::new(),
+            state: ConnState::Connecting,
+            peer_addr,
+            role: ConnRole::Host,
+        };
+        conn.handshake().await?;
+        Ok(conn)
+    }
 
-        let current = self.state.load(Ordering::Acquire);
-        if current != ConnState::Connected as u8 {
-            return Err(Error::InvalidState {
-                current: ConnState::from_u8(current),
-                expected: "Connected",
-            });
-        }
-
-        loop {
-            // Serve leftover from a previous oversized read first.
-            if !inner.leftover.is_empty() {
-                let n = inner.leftover.len().min(buf.len());
-                buf[..n].copy_from_slice(&inner.leftover[..n]);
-                if n < inner.leftover.len() {
-                    inner.leftover.drain(..n);
-                } else {
-                    inner.leftover.clear();
-                }
-                return Ok(n);
+    /// Send hello and announce timeout duration
+    /// - Device endpoint: sends ControlHello with keep_alive_interval_ms
+    /// - Host endpoint: sends ControlHello with keep_alive_interval_ms
+    async fn handshake(&mut self) -> Result<(), Error> {
+        match self.role {
+            ConnRole::Device => {
+                // Device need to send ControlHello
+                unimplemented!("Device handshake not implemented yet");
             }
-
-            // Try to reassemble a complete packet.
-            if let Some(packet) = read_packet(&mut inner.frames)? {
-                match packet {
-                    Packet::Data(payload) => {
-                        let n = payload.len().min(buf.len());
-                        buf[..n].copy_from_slice(&payload[..n]);
-                        if n < payload.len() {
-                            inner.leftover = payload[n..].to_vec();
-                        }
-                        return Ok(n);
-                    }
-                    Packet::ControlPing { id } => {
-                        inner.send_packet(&Packet::ControlPong { id }).await?;
-                        continue;
-                    }
-                    Packet::ControlClose => {
-                        self.state
-                            .store(ConnState::Closing as u8, Ordering::Release);
-                        let _ = inner.send_packet(&Packet::ControlClose).await;
-                        self.state.store(ConnState::Closed as u8, Ordering::Release);
-                        return Err(Error::ConnectionClosed);
-                    }
-                    Packet::ControlKeepAlive => {
-                        continue;
-                    }
-                    Packet::ControlHello | Packet::ControlPong { .. } => {
-                        // Unexpected post-handshake; ignore for prototype.
-                        continue;
-                    }
-                }
-            }
-
-            // Not enough data — read more from the stream.
-            if !inner.fill_frames().await? {
-                self.state.store(ConnState::Closed as u8, Ordering::Release);
-                return Err(Error::ConnectionClosed);
+            ConnRole::Host => {
+                unimplemented!("Host handshake not implemented yet");
             }
         }
     }
 
-    /// Write `buf` as a Data packet to the connection.
-    ///
-    /// Returns the number of bytes accepted (always `buf.len()` on success).
-    pub(crate) async fn write_data(&self, buf: &[u8]) -> Result<usize, Error> {
-        let mut inner = self.inner.lock().await;
-
-        let current = self.state.load(Ordering::Acquire);
-        if current != ConnState::Connected as u8 {
-            return Err(Error::InvalidState {
-                current: ConnState::from_u8(current),
-                expected: "Connected",
-            });
+    async fn send_packet_inner(&mut self, packet: Packet) -> Result<(), Error> {
+        let frames = packet_to_frames(&packet);
+        for frame in frames {
+            let bytes = frame.encode();
+            self.stream.write_all(&bytes).await.map_err(Error::from)?;
         }
-
-        inner.send_packet(&Packet::Data(buf.to_vec())).await?;
-        Ok(buf.len())
-    }
-
-    /// Gracefully close the connection (send ControlClose + shutdown).
-    pub(crate) async fn shutdown(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
-
-        let current = self.state.load(Ordering::Acquire);
-        if current == ConnState::Closed as u8 || current == ConnState::Closing as u8 {
-            return Ok(());
-        }
-
-        self.state
-            .store(ConnState::Closing as u8, Ordering::Release);
-
-        if current == ConnState::Connected as u8 || current == ConnState::Handshaking as u8 {
-            let _ = inner.send_packet(&Packet::ControlClose).await;
-        }
-
-        self.state.store(ConnState::Closed as u8, Ordering::Release);
-        let _ = inner.stream.shutdown().await;
-
         Ok(())
     }
 
-    pub(crate) fn state(&self) -> ConnState {
-        ConnState::from_u8(self.state.load(Ordering::Acquire))
-    }
+    async fn recv_packet_inner(&mut self) -> Result<Packet, Error> {
+        loop {
+            if let Some(packet) = self.packet_buffer.pop_front() {
+                return Ok(packet);
+            }
+            // Read bytes: TCP stream -> byte_buffer
+            let n = self
+                .stream
+                .read_buf(&mut self.byte_buffer)
+                .await
+                .map_err(Error::from)?;
+            if n == 0 {
+                self.state = ConnState::Closed;
+                return Err(Error::ConnectionClosed);
+            }
 
-    pub(crate) fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
+            // Try to decode frames: byte_buffer -> frame_buffer
+            loop {
+                let available = &self.byte_buffer[..];
+                let Some((_, _, payload_len)) =
+                    Frame::peek_head(available).map_err(Error::ProtocolError)?
+                else {
+                    break;
+                };
+                let frame_len = frame::HEADER_SIZE + payload_len;
+                if available.len() < frame_len {
+                    break;
+                }
+                let frame = Frame::decode(&available[..frame_len]).map_err(Error::ProtocolError)?;
+                self.frame_buffer.push_back(frame);
+                self.byte_buffer.advance(frame_len);
+            }
+
+            // Try to assemble packet: frame_buffer -> Packet
+            loop {
+                let contiguous = self.frame_buffer.make_contiguous();
+                let Some(res) = frames_to_packet(contiguous).map_err(Error::ProtocolError)? else {
+                    break;
+                };
+                let (consumed, packet) = res;
+                self.frame_buffer.drain(..consumed);
+                self.packet_buffer.push_back(packet);
+            }
+        }
     }
 }
