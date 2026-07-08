@@ -148,11 +148,13 @@ impl Connection {
         close_timeout_ms: u32,
         keep_alive_factor: f32,
         role: ConnRole,
+        buffer_size: usize,
     ) -> (Self, ConnHandler) {
         stream
             .set_nodelay(true)
             .expect("Expect set nodelay for TCP stream");
-        let (handler, request_rx, packet_response_tx, status_response_tx) = ConnHandler::new();
+        let (handler, request_rx, packet_response_tx, status_response_tx) =
+            ConnHandler::new(buffer_size);
         (
             Connection {
                 io: IoState {
@@ -180,13 +182,14 @@ impl Connection {
         )
     }
 
-    pub async fn connect(
+    pub(crate) async fn connect(
         to_addr: IpAddr,
         to_port: u16,
         connect_timeout: Duration,
         close_timeout_ms: u32,
         timeout_ms: u32,
         keep_alive_factor: f32,
+        buffer_size: usize,
     ) -> Result<ConnHandler, ConnectionCreateError> {
         let peer_addr = SocketAddr::new(to_addr, to_port);
         let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(peer_addr))
@@ -203,18 +206,20 @@ impl Connection {
             close_timeout_ms,
             keep_alive_factor,
             ConnRole::Device,
+            buffer_size,
         );
         conn.handshake().await?;
         handler.task_handle = TaskState::Running(tokio::spawn(async move { conn.run().await }));
         Ok(handler)
     }
 
-    pub async fn listen(
+    pub(crate) async fn listen(
         on_addr: IpAddr,
         on_port: u16,
         timeout_ms: u32,
         close_timeout_ms: u32,
         keep_alive_factor: f32,
+        buffer_size: usize,
     ) -> Result<ConnHandler, ConnectionCreateError> {
         let listen_addr = SocketAddr::new(on_addr, on_port);
         let stream = tokio::net::TcpListener::bind(listen_addr)
@@ -232,6 +237,7 @@ impl Connection {
             close_timeout_ms,
             keep_alive_factor,
             ConnRole::Host,
+            buffer_size,
         );
         conn.handshake().await?;
         handler.task_handle = TaskState::Running(tokio::spawn(async move { conn.run().await }));
@@ -296,7 +302,7 @@ impl Connection {
     /// Send hello and announce timeout duration
     /// - Device endpoint: sends ControlHello with keep_alive_interval_ms
     /// - Host endpoint: sends ControlHello with keep_alive_interval_ms
-    async fn handshake(&mut self) -> Result<(), ConnectionCreateError> {
+    pub(crate) async fn handshake(&mut self) -> Result<(), ConnectionCreateError> {
         let keep_alive_interval_ms = (self.timeout_ms as f32 / self.keep_alive_factor) as u32;
         let peer_keep_alive_interval = match self.role {
             ConnRole::Device => {
@@ -530,15 +536,17 @@ enum TaskState {
 }
 
 impl ConnHandler {
-    fn new() -> (
+    fn new(
+        buffer_size: usize,
+    ) -> (
         Self,
         mpsc::Receiver<Request>,
         mpsc::Sender<Packet>,
         mpsc::Sender<ConnStatus>,
     ) {
-        let (request_tx, request_rx) = mpsc::channel(100);
-        let (packet_response_tx, packet_response_rx) = mpsc::channel(100);
-        let (status_response_tx, status_response_rx) = mpsc::channel(100);
+        let (request_tx, request_rx) = mpsc::channel(buffer_size);
+        let (packet_response_tx, packet_response_rx) = mpsc::channel(buffer_size);
+        let (status_response_tx, status_response_rx) = mpsc::channel(buffer_size);
         (
             ConnHandler {
                 request_tx,
@@ -576,10 +584,7 @@ impl ConnHandler {
         }
     }
 
-    /// Write a sequence of bytes.
-    /// Guarantees that this bytes will be sent as a single Packet,
-    /// and will be received as a single Packet on the other end.
-    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), ConnectionClosed> {
+    pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<(), ConnectionClosed> {
         let state = self.check_task_state().await;
         if let Some(closed) = state {
             return Err(closed);
@@ -591,7 +596,7 @@ impl ConnHandler {
             .map_err(|e| ConnectionClosed::Unknown(e.to_string()))
     }
 
-    pub async fn read(&mut self) -> Result<Vec<u8>, ConnectionClosed> {
+    pub(crate) async fn read(&mut self) -> Result<Vec<u8>, ConnectionClosed> {
         match self.packet_response_rx.recv().await {
             Some(packet) => match packet {
                 Packet::Data(data) => Ok(data),
@@ -601,7 +606,7 @@ impl ConnHandler {
         }
     }
 
-    pub async fn get_status(&mut self) -> Result<ConnStatus, ConnectionClosed> {
+    pub(crate) async fn get_status(&mut self) -> Result<ConnStatus, ConnectionClosed> {
         let state = self.check_task_state().await;
         if let Some(closed) = state {
             return Err(closed);
@@ -616,10 +621,7 @@ impl ConnHandler {
         }
     }
 
-    /// Close the connection gracefully.
-    /// Returns Ok(Res) where Res is the result of the connection task,
-    /// or Err if the connection task has already finished.
-    pub async fn close(&mut self) -> Result<Result<(), ConnectionError>, ConnectionClosed> {
+    pub(crate) async fn close(&mut self) -> Result<Result<(), ConnectionError>, ConnectionClosed> {
         let state = self.check_task_state().await;
         if let Some(closed) = state {
             return Err(closed);
@@ -681,6 +683,7 @@ mod tests {
                 close_timeout_ms,
                 keep_alive_factor,
                 ConnRole::Host,
+                100,
             );
             conn.handshake().await.unwrap();
             conn
@@ -699,6 +702,7 @@ mod tests {
             close_timeout_ms,
             keep_alive_factor,
             ConnRole::Device,
+            100,
         );
         device.handshake().await.unwrap();
 
@@ -796,4 +800,55 @@ mod tests {
         let host = host_closed.await.unwrap();
         assert_eq!(host.state, ConnState::Closed);
     }
+
+    /// Device initiates close, host receives ControlClose and responds.
+    #[tokio::test]
+    async fn device_initiated_close() {
+        let (mut device, mut host) = connected_pair().await;
+
+        let device_closed = tokio::spawn(async move {
+            device.close_inner(false).await.unwrap();
+            device
+        });
+
+        let received = host.io.recv_packet().await.unwrap();
+        assert_eq!(received, Some(Packet::ControlClose));
+
+        let result = host.handle_packet(Packet::ControlClose).await;
+        assert!(matches!(result, Err(ConnectionError::PeerClosed)));
+        assert_eq!(host.state, ConnState::Closed);
+
+        let device = device_closed.await.unwrap();
+        assert_eq!(device.state, ConnState::Closed);
+    }
+
+    /// ConnStatus reflects the real connection state.
+    #[tokio::test]
+    async fn status_reflects_connection() {
+        let (device, host) = connected_pair().await;
+
+        assert_eq!(device.role, ConnRole::Device);
+        assert_eq!(host.role, ConnRole::Host);
+        assert_eq!(device.state, ConnState::Connected);
+        assert_eq!(host.state, ConnState::Connected);
+        assert_eq!(device.peer_addr.ip(), host.peer_addr.ip()); // both on localhost
+        assert_ne!(device.peer_addr.port(), host.peer_addr.port()); // device connected from ephemeral port
+    }
+
+    /// Recv returns None when the peer closes the TCP connection abruptly
+    /// (no ControlClose, just TCP FIN).
+    #[tokio::test]
+    async fn recv_returns_none_on_eof() {
+        let (mut device, _host) = connected_pair().await;
+
+        // Drop the host — its TcpStream is closed, device will see EOF
+        drop(_host);
+
+        // The device should eventually see EOF on its recv side
+        // (the host dropped → kernel sends FIN → device reads 0 bytes)
+        let result = device.io.recv_packet().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+    }
+
 }
