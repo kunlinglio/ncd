@@ -1,8 +1,4 @@
-use std::net::IpAddr;
-
-use crate::DEFAULT_LOCAL_PORT;
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// TODO: This shouldn't be in global config
     pub connect_timeout_ms: u32,

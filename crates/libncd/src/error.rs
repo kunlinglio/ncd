@@ -1,12 +1,7 @@
-use std::io;
-
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum Error {
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
-
     #[error(transparent)]
     PacketDecodeError(#[from] PacketDecodeError),
 
@@ -17,7 +12,7 @@ pub enum Error {
     AssemblePacketError(#[from] AssemblePacketError),
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum PacketDecodeError {
     #[error("Packet data length mismatch: expected {expected}, got {got}. {details}")]
     DataLengthMismatch {
@@ -29,7 +24,7 @@ pub enum PacketDecodeError {
     UnknownTag(u8),
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum FrameDecodeError {
     #[error("Invalid flag value: {0:#04x}")]
     InvalidFlag(u8),
@@ -43,7 +38,7 @@ pub enum FrameDecodeError {
     DataTooShort { expected: usize, got: usize },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum AssemblePacketError {
     #[error("Mismatched types in frames")]
     MismatchedTypes {
