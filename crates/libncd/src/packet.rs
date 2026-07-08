@@ -93,6 +93,9 @@ impl Packet {
             CONTROL_HELLO_TAG => Ok(Self::ControlHello {
                 keep_alive_interval_ms: u32::from_be_bytes([src[0], src[1], src[2], src[3]]),
             }),
+            CONTROL_HELLO_ACK_TAG => Ok(Self::ControlHelloAck {
+                keep_alive_interval_ms: u32::from_be_bytes([src[0], src[1], src[2], src[3]]),
+            }),
             CONTROL_CLOSE_TAG => Ok(Self::ControlClose),
             CONTROL_KEEP_ALIVE_TAG => Ok(Self::ControlKeepAlive),
             CONTROL_PING_TAG => Ok(Self::ControlPing {
@@ -116,6 +119,16 @@ mod tests {
     fn roundtrip_hello() {
         let pkt = Packet::ControlHello {
             keep_alive_interval_ms: 1000,
+        };
+        let (ty, body) = pkt.encode();
+        let decoded = Packet::decode(ty, &body).unwrap();
+        assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn roundtrip_hello_ack() {
+        let pkt = Packet::ControlHelloAck {
+            keep_alive_interval_ms: 2500,
         };
         let (ty, body) = pkt.encode();
         let decoded = Packet::decode(ty, &body).unwrap();

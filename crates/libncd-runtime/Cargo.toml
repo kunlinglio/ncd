@@ -8,3 +8,4 @@ libncd = { path = "../libncd" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 bytes = "1.12.0"
+rand = "0.10.2"

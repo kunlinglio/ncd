@@ -78,59 +78,6 @@ pub fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Err
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufRead;
-    use std::io::Cursor;
-
-    /// A BufRead wrapper that only exposes `limit` bytes at a time via
-    /// `fill_buf`, simulating a TCP stream that hasn't buffered a full
-    /// frame yet.
-    struct ChunkedReader {
-        inner: Cursor<Vec<u8>>,
-        chunk_size: usize,
-    }
-
-    impl ChunkedReader {
-        fn new(data: Vec<u8>, chunk_size: usize) -> Self {
-            Self {
-                inner: Cursor::new(data),
-                chunk_size,
-            }
-        }
-    }
-
-    impl std::io::Read for ChunkedReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let limit = buf.len().min(self.chunk_size);
-            self.inner.read(&mut buf[..limit])
-        }
-    }
-
-    impl BufRead for ChunkedReader {
-        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-            let available = self.inner.fill_buf()?;
-            let limit = available.len().min(self.chunk_size);
-            Ok(&available[..limit])
-        }
-
-        fn consume(&mut self, amt: usize) {
-            self.inner.consume(amt);
-        }
-    }
-
-    fn all_variants() -> Vec<Packet> {
-        vec![
-            Packet::ControlHello {
-                keep_alive_interval_ms: 1000,
-            },
-            Packet::ControlClose,
-            Packet::ControlKeepAlive,
-            Packet::ControlPing { id: 42 },
-            Packet::ControlPong { id: 99 },
-            Packet::Data(b"hello world".to_vec()),
-            Packet::Data(vec![]),
-            Packet::Data(vec![0xCC; MAX_PAYLOAD_SIZE + 1]), // multi-frame
-        ]
-    }
 
     #[test]
     fn frames_to_packet_incomplete_returns_none() {
