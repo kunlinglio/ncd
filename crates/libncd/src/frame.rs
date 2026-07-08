@@ -1,5 +1,5 @@
-use super::{DEFAULT_MAX_PAYLOAD_SIZE, MAGIC_NUMBER, VERSION};
-use crate::error::Error;
+use super::{MAGIC_NUMBER, MAX_PAYLOAD_SIZE, VERSION};
+use crate::error::{Error, FrameDecodeError};
 
 /// Frame represents a single frame in the Network Character Device Protocol.
 /// Frame Structure:
@@ -14,7 +14,10 @@ pub struct Frame {
     pub ty: u8, // type
     pub payload: Vec<u8>,
 }
-pub const HEADER_SIZE_BYTE: usize = 8;
+pub const HEADER_SIZE: usize = 8;
+
+const END_FLAG: u8 = 0x00;
+const MORE_FLAG: u8 = 0x01;
 
 /// Sequence flags
 /// If the user request is larger than the maximum payload size, the request will be split into multiple frames.
@@ -24,20 +27,17 @@ pub const HEADER_SIZE_BYTE: usize = 8;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flag {
-    End = 0x00,
-    More = 0x01,
+    End = END_FLAG,
+    More = MORE_FLAG,
 }
 
 impl TryFrom<u8> for Flag {
     type Error = Error;
     fn try_from(v: u8) -> Result<Self, Error> {
         match v {
-            0x00 => Ok(Flag::End),
-            0x01 => Ok(Flag::More),
-            _ => Err(Error::PacketDecodeError(format!(
-                "Invalid flag value: {}",
-                v
-            ))),
+            END_FLAG => Ok(Flag::End),
+            MORE_FLAG => Ok(Flag::More),
+            _ => Err(FrameDecodeError::InvalidFlag(v).into()),
         }
     }
 }
@@ -45,78 +45,67 @@ impl TryFrom<u8> for Flag {
 impl Frame {
     /// TODO: Optimize memory allocation
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(HEADER_SIZE_BYTE + self.payload.len());
+        let mut buf = Vec::with_capacity(HEADER_SIZE + self.payload.len());
         buf.extend_from_slice(MAGIC_NUMBER); // 24 bit
         buf.extend_from_slice(&VERSION.to_be_bytes()); // 8 bit
         assert!(
-            self.payload.len() <= DEFAULT_MAX_PAYLOAD_SIZE,
-            "Payload length exceeds DEFAULT_MAX_PAYLOAD_SIZE ({} > {})",
+            self.payload.len() <= MAX_PAYLOAD_SIZE,
+            "Payload length exceeds MAX_PAYLOAD_SIZE ({} > {})",
             self.payload.len(),
-            DEFAULT_MAX_PAYLOAD_SIZE
+            MAX_PAYLOAD_SIZE
         );
         let length = self.payload.len() as u16;
         buf.extend_from_slice(&length.to_be_bytes()); // 16 bit
         buf.push(self.flag as u8); // 8 bit
         buf.push(self.ty); // 8 bit
-        assert_eq!(buf.len(), HEADER_SIZE_BYTE);
+        assert_eq!(buf.len(), HEADER_SIZE);
 
         buf.extend_from_slice(&self.payload);
         buf
     }
 
     pub(crate) fn decode(src: &[u8]) -> Result<Self, Error> {
-        if src.len() < HEADER_SIZE_BYTE {
-            return Err(Error::PacketDecodeError("Source data is too short".into()));
-        }
-        let magic = &src[0..3];
-        if magic != MAGIC_NUMBER {
-            return Err(Error::PacketDecodeError(format!(
-                "Invalid magic number: {:?}",
-                magic
-            )));
-        }
-        let version = src[3];
-        if version != VERSION {
-            return Err(Error::PacketDecodeError(format!(
-                "Invalid version: {}",
-                version
-            )));
-        }
-        let length = u16::from_be_bytes([src[4], src[5]]) as usize;
-        let flag = src[6];
-        let ty = src[7];
-        if src.len() < HEADER_SIZE_BYTE + length {
-            return Err(Error::PacketDecodeError(
-                "Source data is too short for payload".into(),
-            ));
-        }
-        let payload = src[HEADER_SIZE_BYTE..HEADER_SIZE_BYTE + length].to_vec();
+        let Some((ty, flag, length)) = Self::peek_head(src)? else {
+            return Err(FrameDecodeError::DataShorterThanHeader {
+                expected: HEADER_SIZE,
+                got: src.len(),
+            }
+            .into());
+        };
 
-        Ok(Frame {
-            flag: Flag::try_from(flag)?,
-            ty,
-            payload,
-        })
+        let expected_total_length = HEADER_SIZE + length;
+        if src.len() < HEADER_SIZE + length {
+            return Err(FrameDecodeError::DataTooShort {
+                expected: expected_total_length,
+                got: src.len(),
+            }
+            .into());
+        }
+        let payload = src[HEADER_SIZE..HEADER_SIZE + length].to_vec();
+
+        Ok(Frame { flag, ty, payload })
     }
 
     /// Returns: (type, flag, payload length)
     pub(crate) fn peek_head(src: &[u8]) -> Result<Option<(u8, Flag, usize)>, Error> {
-        if src.len() < HEADER_SIZE_BYTE {
+        if src.len() < HEADER_SIZE {
             return Ok(None);
         }
-        let magic = &src[0..3];
-        if magic != MAGIC_NUMBER {
-            return Err(Error::PacketDecodeError(format!(
-                "Invalid magic number: {:?}",
-                magic
-            )));
+        let magic: [u8; 3] = src[0..3].try_into().expect("Slice with incorrect length");
+        if &magic != MAGIC_NUMBER {
+            return Err(FrameDecodeError::InvalidMagicNumber {
+                expected: MAGIC_NUMBER.clone(),
+                actual: magic.clone(),
+            }
+            .into());
         }
         let version = src[3];
         if version != VERSION {
-            return Err(Error::PacketDecodeError(format!(
-                "Invalid version: {}",
-                version
-            )));
+            return Err(FrameDecodeError::InvalidVersion {
+                expected: VERSION,
+                actual: version,
+            }
+            .into());
         }
         let length = u16::from_be_bytes([src[4], src[5]]) as usize;
         let flag = src[6];
@@ -171,10 +160,10 @@ mod tests {
         let frame = Frame {
             flag: Flag::End,
             ty: 0x06,
-            payload: vec![0xBB; DEFAULT_MAX_PAYLOAD_SIZE],
+            payload: vec![0xBB; MAX_PAYLOAD_SIZE],
         };
         let bytes = frame.encode();
-        assert_eq!(bytes.len(), HEADER_SIZE_BYTE + DEFAULT_MAX_PAYLOAD_SIZE);
+        assert_eq!(bytes.len(), HEADER_SIZE + MAX_PAYLOAD_SIZE);
         let decoded = Frame::decode(&bytes).unwrap();
         assert_eq!(decoded, frame);
     }
@@ -219,8 +208,14 @@ mod tests {
     fn decode_rejects_short_header() {
         let err = Frame::decode(&[0x4E, 0x43]).unwrap_err();
         assert!(
-            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("too short")),
-            "expected 'too short' error, got {err:?}"
+            matches!(
+                &err,
+                Error::FrameDecodeError(FrameDecodeError::DataShorterThanHeader {
+                    expected: 8,
+                    got: 2,
+                })
+            ),
+            "expected DataShorterThanHeader {{ expected: 8, got: 2 }}, got {err:?}"
         );
     }
 
@@ -230,8 +225,14 @@ mod tests {
         bytes[3] = super::VERSION;
         let err = Frame::decode(&bytes).unwrap_err();
         assert!(
-            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("magic")),
-            "expected magic error, got {err:?}"
+            matches!(
+                &err,
+                Error::FrameDecodeError(FrameDecodeError::InvalidMagicNumber {
+                    expected: [0x4E, 0x43, 0x44],
+                    actual: [0xFF, 0xFF, 0xFF],
+                })
+            ),
+            "expected InvalidMagicNumber, got {err:?}"
         );
     }
 
@@ -245,8 +246,14 @@ mod tests {
         bytes.push(0x01); // type
         let err = Frame::decode(&bytes).unwrap_err();
         assert!(
-            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("version")),
-            "expected version error, got {err:?}"
+            matches!(
+                &err,
+                Error::FrameDecodeError(FrameDecodeError::InvalidVersion {
+                    expected: super::VERSION,
+                    actual: 0xFF,
+                })
+            ),
+            "expected InvalidVersion, got {err:?}"
         );
     }
 
@@ -261,8 +268,14 @@ mod tests {
         // No payload appended
         let err = Frame::decode(&bytes).unwrap_err();
         assert!(
-            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("too short")),
-            "expected 'too short' error, got {err:?}"
+            matches!(
+                &err,
+                Error::FrameDecodeError(FrameDecodeError::DataTooShort {
+                    expected: 18, // HEADER_SIZE_BYTE(8) + payload_len(10)
+                    got: 8,
+                })
+            ),
+            "expected DataTooShort {{ expected: 18, got: 8 }}, got {err:?}"
         );
     }
 
@@ -276,8 +289,11 @@ mod tests {
         bytes.push(0x01); // type
         let err = Frame::decode(&bytes).unwrap_err();
         assert!(
-            matches!(&err, Error::PacketDecodeError(msg) if msg.contains("flag")),
-            "expected flag error, got {err:?}"
+            matches!(
+                &err,
+                Error::FrameDecodeError(FrameDecodeError::InvalidFlag(0xFF))
+            ),
+            "expected InvalidFlag(0xFF), got {err:?}"
         );
     }
 }

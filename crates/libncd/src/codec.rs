@@ -1,17 +1,17 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
-use crate::error::Error;
+use crate::error::{AssemblePacketError, Error};
 
-use super::DEFAULT_MAX_PAYLOAD_SIZE;
-use super::frame::{Flag, Frame, HEADER_SIZE_BYTE};
+use super::MAX_PAYLOAD_SIZE;
+use super::frame::{Flag, Frame, HEADER_SIZE};
 use super::packet::Packet;
 
 /// Fragment a Packet into multiple Frames if necessary, based on the maximum payload size.
 fn packet_to_frames(packet: &Packet) -> Vec<Frame> {
     let payload_length = packet.length();
-    if payload_length <= DEFAULT_MAX_PAYLOAD_SIZE {
-        let (ty, payload) = packet.encode_body();
+    if payload_length <= MAX_PAYLOAD_SIZE {
+        let (ty, payload) = packet.encode();
         vec![Frame {
             flag: Flag::End,
             ty,
@@ -20,10 +20,11 @@ fn packet_to_frames(packet: &Packet) -> Vec<Frame> {
     } else {
         let mut frames = Vec::new();
         let mut offset = 0;
-        let (ty, bytes) = packet.encode_body();
+        let (ty, bytes) = packet.encode();
+        assert_eq!(bytes.len(), payload_length, "Packet length mismatch");
         while offset < payload_length {
             let remaining = payload_length - offset;
-            let chunk_size = std::cmp::min(remaining, DEFAULT_MAX_PAYLOAD_SIZE);
+            let chunk_size = std::cmp::min(remaining, MAX_PAYLOAD_SIZE);
             let chunk_payload = bytes[offset..offset + chunk_size].to_vec();
             let flag = if remaining > chunk_size {
                 Flag::More
@@ -45,9 +46,7 @@ fn packet_to_frames(packet: &Packet) -> Vec<Frame> {
 /// Returns: (consumed_frames, Packet)
 fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Error> {
     if frames.is_empty() {
-        return Err(Error::PacketDecodeError(
-            "No frames provided for packet reconstruction".into(),
-        ));
+        return Ok(None);
     }
 
     let first_frame = &frames[0];
@@ -58,9 +57,11 @@ fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Error> 
     let mut finished_packet = false;
     for frame in frames {
         if frame.ty != ty {
-            return Err(Error::PacketDecodeError(
-                "Mismatched types in frames".into(),
-            ));
+            return Err(AssemblePacketError::MismatchedTypes {
+                first_frame_type: ty,
+                frame_type: frame.ty,
+            }
+            .into());
         }
         payload.extend_from_slice(&frame.payload);
         consumed_frames += 1;
@@ -73,7 +74,7 @@ fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Error> 
         return Ok(None);
     }
 
-    let packet = Packet::decode_body(ty, &payload)?;
+    let packet = Packet::decode(ty, &payload)?;
     Ok(Some((consumed_frames, packet)))
 }
 
@@ -92,7 +93,7 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> Result<Option<Frame>, Error> {
     let Some((_ty, _flag, payload_len)) = Frame::peek_head(available)? else {
         return Ok(None);
     };
-    let frame_len = HEADER_SIZE_BYTE + payload_len;
+    let frame_len = HEADER_SIZE + payload_len;
 
     if available.len() < frame_len {
         return Ok(None);
@@ -125,6 +126,7 @@ pub fn read_packet(frame_buf: &mut VecDeque<Frame>) -> Result<Option<Packet>, Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::FrameDecodeError;
     use std::io::Cursor;
 
     /// A BufRead wrapper that only exposes `limit` bytes at a time via
@@ -172,7 +174,7 @@ mod tests {
             Packet::ControlPong { id: 99 },
             Packet::Data(b"hello world".to_vec()),
             Packet::Data(vec![]),
-            Packet::Data(vec![0xCC; DEFAULT_MAX_PAYLOAD_SIZE + 1]), // multi-frame
+            Packet::Data(vec![0xCC; MAX_PAYLOAD_SIZE + 1]), // multi-frame
         ]
     }
 
@@ -226,11 +228,8 @@ mod tests {
     }
 
     #[test]
-    fn frames_to_packet_empty_is_error() {
-        assert!(matches!(
-            frames_to_packet(&[]).unwrap_err(),
-            Error::PacketDecodeError(msg) if msg.contains("No frames")
-        ));
+    fn frames_to_packet_empty_returns_none() {
+        assert!(frames_to_packet(&[]).unwrap().is_none());
     }
 
     #[test]
@@ -249,7 +248,10 @@ mod tests {
         ];
         assert!(matches!(
             frames_to_packet(&frames).unwrap_err(),
-            Error::PacketDecodeError(msg) if msg.contains("Mismatched")
+            Error::AssemblePacketError(AssemblePacketError::MismatchedTypes {
+                first_frame_type: 0x01,
+                frame_type: 0x06,
+            })
         ));
     }
 
@@ -277,7 +279,10 @@ mod tests {
         data[3] = super::super::VERSION;
         assert!(matches!(
             read_frame(&mut Cursor::new(data)).unwrap_err(),
-            Error::PacketDecodeError(msg) if msg.contains("magic")
+            Error::FrameDecodeError(FrameDecodeError::InvalidMagicNumber {
+                expected: [0x4E, 0x43, 0x44],
+                actual: [0xFF, 0xFF, 0xFF],
+            })
         ));
     }
 

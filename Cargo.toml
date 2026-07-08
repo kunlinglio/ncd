@@ -9,3 +9,4 @@ members = [
 
 [workspace.dependencies]
 tokio = "1.52.3"
+thiserror = "2.0.18"
