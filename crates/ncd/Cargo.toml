@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-libncd = { path = "../libncd" }
+libncd-runtime = { path = "../libncd-runtime" }
+thiserror.workspace = true
+tokio = { workspace = true }

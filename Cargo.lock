@@ -85,7 +85,9 @@ dependencies = [
 name = "ncd"
 version = "0.1.0"
 dependencies = [
- "libncd",
+ "libncd-runtime",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
