@@ -21,7 +21,7 @@ impl Default for Config {
             close_timeout_ms: 5000,
             timeout_ms: 5000,
             keep_alive_factor: 2.0,
-            max_buffer_size: 1 * 1024, // 1 KB
+            max_buffer_size: 1 * 1024 * 1024, // 1 MB
         }
     }
 }

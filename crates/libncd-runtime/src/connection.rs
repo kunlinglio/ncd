@@ -244,6 +244,7 @@ impl Connection {
     /// Main event loop for this connection
     async fn run(&mut self) -> Result<(), ConnectionError> {
         while self.state == ConnState::Connected {
+            self.ping_peer().await?; // Ping peer after running the loop
             select! {
                 _ = async {
                     self.keep_alive_timer
@@ -261,9 +262,7 @@ impl Connection {
                         .tick()
                         .await
                 }, if self.peer_query_active_timer.is_some() => {
-                    let id = rand::random::<u32>();
-                    self.ping_timers.insert(id, Instant::now());
-                    self.io.send_packet(&Packet::ControlPing { id }).await?;
+                    self.ping_peer().await?;
                 }
                 _ = async {
                     self.peer_active_timeout_timer
@@ -381,6 +380,13 @@ impl Connection {
         self.peer_query_active_timer.as_mut().unwrap().reset();
         self.peer_active_timeout_timer.as_mut().unwrap().reset();
         self.switch_to(ConnState::Connected);
+        Ok(())
+    }
+
+    async fn ping_peer(&mut self) -> Result<(), ConnectionError> {
+        let id = rand::random::<u32>();
+        self.ping_timers.insert(id, Instant::now());
+        self.io.send_packet(&Packet::ControlPing { id }).await?;
         Ok(())
     }
 

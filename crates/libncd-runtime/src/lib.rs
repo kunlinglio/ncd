@@ -48,6 +48,7 @@ pub async fn read(conn: &mut ConnHandler) -> Result<Vec<u8>, ConnectionClosed> {
 /// Write a sequence of bytes.
 /// Note: Unlike TCP, NCD guarantees that this message will be sent as a single Packet,
 ///       and will be received as a single message on the other end.
+/// Note: If peer closed connection, NCD does not guarantee that peer will receive the message.
 pub async fn write(conn: &mut ConnHandler, message: &[u8]) -> Result<(), ConnectionClosed> {
     conn.write(message).await
 }
