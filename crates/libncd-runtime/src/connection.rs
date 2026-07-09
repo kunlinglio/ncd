@@ -533,7 +533,7 @@ impl Connection {
 }
 
 #[derive(Debug)]
-pub enum Request {
+enum Request {
     Close,
     Send(Packet),
     GetStatus,

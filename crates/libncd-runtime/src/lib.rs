@@ -2,16 +2,18 @@
 
 mod config;
 mod connection;
-pub use connection::ConnHandler;
 pub mod error;
 mod runtime;
 
 use std::sync::OnceLock;
 
-use crate::config::Config;
-use crate::connection::ConnStatus;
 use crate::error::{ConnectionClosed, ConnectionCreateError, ConnectionError};
-use crate::runtime::{OpenParams, Runtime};
+use crate::runtime::Runtime;
+
+pub use crate::config::Config;
+pub use crate::connection::ConnHandler;
+pub use crate::connection::ConnStatus;
+pub use crate::runtime::OpenParams;
 
 /// Global runtime singleton (placeholder for future keepalive scheduling).
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
