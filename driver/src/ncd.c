@@ -14,17 +14,21 @@
 #include <linux/kfifo.h>
 #include <linux/spinlock.h>
 
-
-#define DEVICE_NAME "ncd"          // device node name
+#define DEVICE_NAME "ncd"          // device major name, not a specific device node name
 #define CLASS_NAME  "ncd_class"    // device class name
+#define NCD_MAX_DEVICES 16         // maximum number of devices
+#define NCD_MAX_NAME_LEN 32        // maximum length of device name
+
 #define NETLINK_USER 31            // Netlink protocol number
 
 /* Netlink message types */
-#define NCD_MSG_REGISTER   0       // daemon→driver:  get daemon PID
-#define NCD_MSG_OPEN_REQ   1       // driver→daemon:  request to open device (and wait for connection)
-#define NCD_MSG_CONN_RES   2       // daemon→driver:  connection result (success/fail)
-#define NCD_MSG_DATA       3       // bi-directional: data transfer
-#define NCD_MSG_CLOSE_REQ  4       // driver→daemon:  request to close device
+#define NCD_MSG_REGISTER    0       // daemon→driver:  get daemon PID
+#define NCD_MSG_OPEN_REQ    1       // driver→daemon:  request to open device (and wait for connection)
+#define NCD_MSG_CONN_RES    2       // daemon→driver:  connection result (success/fail)
+#define NCD_MSG_DATA        3       // bi-directional: data transfer
+#define NCD_MSG_CLOSE_REQ   4       // driver→daemon:  request to close device
+#define NCD_MSG_CREATE_DEV  5       // daemon→driver:  create device
+#define NCD_MSG_DESTROY_DEV 6       // daemon→driver:  destroy device
 
 /* Connection status */
 #define CONN_WAITING  0
@@ -43,7 +47,6 @@ MODULE_AUTHOR("zhegebi");
 struct ncd_device {
     struct cdev cdev;
     dev_t dev_num;
-    struct class *class;
     struct device *device;
 
     wait_queue_head_t conn_wait_queue;      // open wait queue for connection result
@@ -52,14 +55,29 @@ struct ncd_device {
     struct kfifo data_fifo;                 // data buffer for received data from daemon
     spinlock_t fifo_lock;                   // protects data_fifo (kfifo_reset vs kfifo_in)
 
-    pid_t user_pid;                         // Daemon PID (Netlink callback records)
     int conn_status;                        // Connection status: 0 waiting, 1 success, -1 failed
 
     atomic_t open_count;                    // Number of processes currently opening the device
+
+    unsigned char minor;                    // minor device number, which means the array index
+    bool in_use;                            // whether the array index is in use
+    char name[NCD_MAX_NAME_LEN];            // device node name
 };
 
-static struct ncd_device *ncd_dev;
+static struct ncd_device *ncd_devices[NCD_MAX_DEVICES];
+static struct class *ncd_class;
+static pid_t daemon_pid;
+static dev_t ncd_major_dev; // major device number(minor = 0)
 static struct sock *nl_sk = NULL;
+static struct file_operations ncd_file_operations;
+
+
+static int find_free_slot(void) {
+    for(int i = 0; i < NCD_MAX_DEVICES; i++) {
+        if(!ncd_devices[i] || !ncd_devices[i]->in_use) return i;
+    }
+    return -ENOSPC;
+}
 
 
 /**
@@ -73,12 +91,11 @@ static int send_to_daemon(const char *msg, int len, int type)
 {
     struct sk_buff *skb;
     struct nlmsghdr *nlh;
-    struct ncd_device *dev = ncd_dev;
     int ret;
 
     /* Invalid argument */
-    if(!dev || dev->user_pid == 0) {
-        pr_err("ncd: daemon not ready, PID=%d\n", dev ? dev->user_pid : -1);
+    if(daemon_pid == 0) {
+        pr_err("ncd: daemon not ready\n");
         return -EINVAL;
     }
 
@@ -94,10 +111,10 @@ static int send_to_daemon(const char *msg, int len, int type)
     }
     if(len > 0 && msg) memcpy(nlmsg_data(nlh), msg, len);  // copy payload to message segment
 
-    ret = nlmsg_unicast(nl_sk, skb, dev->user_pid); // send message to daemon
+    ret = nlmsg_unicast(nl_sk, skb, daemon_pid); // send message to daemon
     if(ret < 0) {
         pr_err("ncd: nlmsg_unicast error: %d, the daemon may be dead\n", ret);
-        dev->user_pid = 0;  // daemon is dead, allow re-registration
+        daemon_pid = 0;  // daemon is dead, allow re-registration
     }
     return ret;
 }
@@ -110,60 +127,166 @@ static int send_to_daemon(const char *msg, int len, int type)
 static void recv_from_daemon(struct sk_buff *skb)
 {
     struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
-    struct ncd_device *dev = ncd_dev;
     int type = nlh->nlmsg_type;
     char* data;
     int len;
-
-    if(!dev) return;
+    int ret;
 
     switch(type) {
         case NCD_MSG_REGISTER:
-            if(dev->user_pid != 0) {
-                pr_warn("ncd: daemon already registered (PID=%d), ignoring\n", dev->user_pid);
+            if(daemon_pid != 0) {
+                pr_warn("ncd: daemon already registered (PID=%d), ignoring\n", daemon_pid);
                 break;
             }
             /* record daemon PID*/
-            dev->user_pid = nlh->nlmsg_pid;
-            pr_info("ncd: daemon PID=%d registered\n", dev->user_pid);
+            daemon_pid = nlh->nlmsg_pid;
+            pr_info("ncd: daemon PID=%d registered\n", daemon_pid);
             break;
         case NCD_MSG_CONN_RES:
-            if(nlh->nlmsg_pid != dev->user_pid) break;
+            if(nlh->nlmsg_pid != daemon_pid) {
+                pr_warn("ncd: unknown PID %d, ignoring\n", nlh->nlmsg_pid);
+                break;
+            }
             /* receive connection result from daemon */
-            if(nlh->nlmsg_len > NLMSG_HDRLEN) {
+            if(nlh->nlmsg_len > NLMSG_HDRLEN + 1) {
                 data = (char *)nlmsg_data(nlh);
                 len = nlh->nlmsg_len - NLMSG_HDRLEN;
 
-                if(data[0] == '1') {
-                    dev->conn_status = CONN_SUCCESS;
+                unsigned char minor = data[0];
+                if (minor >= NCD_MAX_DEVICES || !ncd_devices[minor] || !ncd_devices[minor]->in_use) break;
+
+                if(data[1] == '1') {
+                    ncd_devices[minor]->conn_status = CONN_SUCCESS;
                     pr_info("ncd: client connected\n");
                 } else {
-                    dev->conn_status = CONN_FAILED;
+                    ncd_devices[minor]->conn_status = CONN_FAILED;
                     pr_err("ncd: client connection failed\n");
                 }
 
                 /* wake up open wait queue */
-                wake_up_interruptible(&dev->conn_wait_queue);
+                wake_up_interruptible(&ncd_devices[minor]->conn_wait_queue);
             }
             break;
         case NCD_MSG_DATA:
-            if(nlh->nlmsg_pid != dev->user_pid) break;
+            if(nlh->nlmsg_pid != daemon_pid) {
+                pr_warn("ncd: unknown PID %d, ignoring\n", nlh->nlmsg_pid);
+                break;
+            }
             /* receive data from daemon */
             if(nlh->nlmsg_len > NLMSG_HDRLEN) {
                 data = (char *)nlmsg_data(nlh);
                 len = nlh->nlmsg_len - NLMSG_HDRLEN;
 
-                spin_lock(&dev->fifo_lock);
-                unsigned int copied = kfifo_in(&dev->data_fifo, data, len);
-                spin_unlock(&dev->fifo_lock);
+                unsigned char minor = data[0];
+                if (minor >= NCD_MAX_DEVICES || !ncd_devices[minor] || !ncd_devices[minor]->in_use) {
+                    pr_warn("ncd: unknown minor %d, ignoring\n", minor);
+                    break;
+                }
+
+                spin_lock(&ncd_devices[minor]->fifo_lock);
+                unsigned int copied = kfifo_in(&ncd_devices[minor]->data_fifo, data + 1, len - 1);
+                spin_unlock(&ncd_devices[minor]->fifo_lock);
 
                 if(copied > 0) {
                     /* wake up read wait queue */
-                    wake_up_interruptible(&dev->read_wait_queue);
+                    wake_up_interruptible(&ncd_devices[minor]->read_wait_queue);
                 }
-                if(copied < len) {
-                    pr_warn("ncd: kfifo full, dropped %u bytes\n", len - copied);
+                if(copied < len - 1) {
+                    pr_warn("ncd: kfifo full, dropped %u bytes\n", len - 1 - copied);
                 }
+            }
+            break;
+        case NCD_MSG_CREATE_DEV:
+            if(nlh->nlmsg_pid != daemon_pid) {
+                pr_warn("ncd: unknown PID %d, ignoring\n", nlh->nlmsg_pid);
+                break;
+            }
+            /* receive device name from daemon */
+            data = (char *)nlmsg_data(nlh);
+            len = nlh->nlmsg_len - NLMSG_HDRLEN;
+            if(len <= 0) {
+                pr_err("ncd: invalid device name length, ignoring\n");
+                break;
+            }
+            len = len >= NCD_MAX_NAME_LEN ? NCD_MAX_NAME_LEN - 1 : len;
+            int slot = find_free_slot();
+            if(slot < 0) {
+                pr_err("ncd: no free slot for device\n");
+                break;
+            }
+            if(!ncd_devices[slot]) {
+                ncd_devices[slot] = kzalloc(sizeof(struct ncd_device), GFP_ATOMIC);
+                if(!ncd_devices[slot]) {
+                    pr_err("ncd: kzalloc failed, error: %d \n", -ENOMEM);
+                    break;
+                }
+            }
+
+            /* initialize device properties */
+            ncd_devices[slot]->minor = slot;
+            ncd_devices[slot]->in_use = true;
+            memcpy(ncd_devices[slot]->name, data, len);
+            ncd_devices[slot]->name[len] = '\0';
+            ncd_devices[slot]->dev_num = MKDEV(MAJOR(ncd_major_dev), slot);
+
+            /* initialize cdev */
+            cdev_init(&ncd_devices[slot]->cdev, &ncd_file_operations);
+            ncd_devices[slot]->cdev.owner = THIS_MODULE;
+            ret = cdev_add(&ncd_devices[slot]->cdev, ncd_devices[slot]->dev_num, 1);
+            if(ret < 0) {
+                pr_err("ncd: cdev_add failed, error: %d\n", ret);
+                ncd_devices[slot]->in_use = false;
+                break;
+            }
+
+            /* initialize synchronization primitives */
+            init_waitqueue_head(&ncd_devices[slot]->conn_wait_queue);
+            init_waitqueue_head(&ncd_devices[slot]->read_wait_queue);
+            spin_lock_init(&ncd_devices[slot]->fifo_lock);
+            atomic_set(&ncd_devices[slot]->open_count, 0);
+            ncd_devices[slot]->conn_status = CONN_WAITING;
+
+            /* kfifo alloc */
+            ret = kfifo_alloc(&ncd_devices[slot]->data_fifo, FIFO_SIZE, GFP_ATOMIC);
+            if(ret < 0) {
+                pr_err("ncd: kfifo_alloc failed, ret=%d\n", ret);
+                cdev_del(&ncd_devices[slot]->cdev);
+                ncd_devices[slot]->in_use = false;
+                break;
+            }
+
+            /* create device */
+            ncd_devices[slot]->device = device_create(ncd_class, NULL, 
+                                                     ncd_devices[slot]->dev_num, NULL, 
+                                                      ncd_devices[slot]->name);
+            if(IS_ERR(ncd_devices[slot]->device)) {
+                ret = PTR_ERR(ncd_devices[slot]->device);
+                pr_err("ncd: device_create failed, error: %d\n", ret);
+                kfifo_free(&ncd_devices[slot]->data_fifo);
+                cdev_del(&ncd_devices[slot]->cdev);
+                ncd_devices[slot]->in_use = false;
+                break;
+            }
+            pr_info("ncd: driver initialized (major=%d, minor=%d, name=%s)\n", 
+                    MAJOR(ncd_devices[slot]->dev_num), slot, ncd_devices[slot]->name);
+            break;
+        case NCD_MSG_DESTROY_DEV:
+            if(nlh->nlmsg_pid != daemon_pid) {
+                pr_warn("ncd: unknown PID %d, ignoring\n", nlh->nlmsg_pid);
+                break;
+            }
+            /* receive minor from daemon and destroy device */
+            if(nlh->nlmsg_len > NLMSG_HDRLEN) {
+                data = (char *)nlmsg_data(nlh);
+                unsigned char minor = data[0];
+                if (minor >= NCD_MAX_DEVICES || !ncd_devices[minor] || !ncd_devices[minor]->in_use) {
+                    pr_warn("ncd: unknown minor %d, ignoring\n", minor);
+                    break;
+                }
+                device_destroy(ncd_class, ncd_devices[minor]->dev_num);
+                kfifo_free(&ncd_devices[minor]->data_fifo);
+                cdev_del(&ncd_devices[minor]->cdev);
+                ncd_devices[minor]->in_use = false;
             }
             break;
         default:
@@ -192,7 +315,9 @@ static int ncd_open(struct inode *inode, struct file *filp)
 
     dev->conn_status = CONN_WAITING;
 
-    ret = send_to_daemon(NULL, 0, NCD_MSG_OPEN_REQ);
+    char payload[1] = {dev->minor};
+
+    ret = send_to_daemon(payload, 1, NCD_MSG_OPEN_REQ);
     if(ret < 0) {
         pr_err("ncd: send OPEN_REQ failed, err=%d\n", ret);
         atomic_set(&dev->open_count, 0);
@@ -267,6 +392,7 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
  */
 static ssize_t ncd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
 {
+    struct ncd_device *dev = filp->private_data;
     char* kbuf;
     int ret;
 
@@ -276,14 +402,14 @@ static ssize_t ncd_write(struct file *filp, const char __user *buf, size_t count
     /* Out of memory */
     if(!kbuf) return -ENOMEM;
 
-    if(copy_from_user(kbuf, buf, count)) {
+    kbuf[0] = dev->minor;
+
+    if(copy_from_user(kbuf + 1, buf, count)) {
         kfree(kbuf);
         return -EFAULT;
     }
 
-    kbuf[count] = '\0'; // used for print debug log
-
-    ret = send_to_daemon(kbuf, count, NCD_MSG_DATA);
+    ret = send_to_daemon(kbuf, count + 1, NCD_MSG_DATA);
     kfree(kbuf);
 
     return ret < 0 ? ret : count;
@@ -301,7 +427,9 @@ static int ncd_release(struct inode *inode, struct file *filp)
 
     if(!dev) return 0;
 
-    send_to_daemon(NULL, 0, NCD_MSG_CLOSE_REQ);
+    char payload[1] = {dev->minor};
+
+    send_to_daemon(payload, 1, NCD_MSG_CLOSE_REQ);
 
     dev->conn_status = CONN_WAITING;
 
@@ -328,117 +456,65 @@ static int __init ncd_init(void)
 {
     int ret;
 
-    /* 1. Allocate device structure */
-    ncd_dev = kzalloc(sizeof(struct ncd_device), GFP_KERNEL);
-    if(!ncd_dev) {
-        ret = -ENOMEM;
-        return ret;
-    }
-
-    /* 2. Register character device dynamically */
-    ret = alloc_chrdev_region(&ncd_dev->dev_num, 0, 1, DEVICE_NAME);
+    /* 1. Allocate major device number (reserve NCD_MAX_DEVICES minors) */
+    ret = alloc_chrdev_region(&ncd_major_dev, 0, NCD_MAX_DEVICES, DEVICE_NAME);
     if(ret < 0) {
-        pr_err("ncd: alloc_chrdev_region failed\n");
-        kfree(ncd_dev);
-        ncd_dev = NULL;
+        pr_err("ncd: alloc_chrdev_region failed, error: %d\n", ret);
         return ret;
     }
 
-    /* 3. Initialize cdev */
-    cdev_init(&ncd_dev->cdev, &ncd_file_operations);
-    ncd_dev->cdev.owner = THIS_MODULE;
-    ret = cdev_add(&ncd_dev->cdev, ncd_dev->dev_num, 1);
-    if(ret < 0) {
-        pr_err("ncd: cdev_add failed\n");
-        unregister_chrdev_region(ncd_dev->dev_num, 1);
-        kfree(ncd_dev);
-        ncd_dev = NULL;
+    /* 2. Create device class */
+    ncd_class = class_create(CLASS_NAME);
+    if(IS_ERR(ncd_class)) {
+        ret = PTR_ERR(ncd_class);
+        pr_err("ncd: class_create failed, error: %d\n", ret);
+        unregister_chrdev_region(ncd_major_dev, NCD_MAX_DEVICES);
         return ret;
     }
 
-    /* 4. Initialize waitqueue, spinlock, atomic variable and kfifo */
-    init_waitqueue_head(&ncd_dev->conn_wait_queue);
-    init_waitqueue_head(&ncd_dev->read_wait_queue);
-    spin_lock_init(&ncd_dev->fifo_lock);
-    atomic_set(&ncd_dev->open_count, 0);
-    ncd_dev->user_pid = 0;
-    ncd_dev->conn_status = CONN_WAITING;
-    ret = kfifo_alloc(&ncd_dev->data_fifo, FIFO_SIZE, GFP_KERNEL);
-    if(ret < 0) {
-        pr_err("ncd: kfifo_alloc failed, ret=%d\n", ret);
-        cdev_del(&ncd_dev->cdev);
-        unregister_chrdev_region(ncd_dev->dev_num, 1);
-        kfree(ncd_dev);
-        ncd_dev = NULL;
-        return ret;
-    }
-
-    /* 5. Create class and device node */
-    ncd_dev->class = class_create(CLASS_NAME);
-    if(IS_ERR(ncd_dev->class)) {
-        ret = PTR_ERR(ncd_dev->class);
-        pr_err("ncd: class_create failed\n");
-        kfifo_free(&ncd_dev->data_fifo);
-        cdev_del(&ncd_dev->cdev);
-        unregister_chrdev_region(ncd_dev->dev_num, 1);
-        kfree(ncd_dev);
-        ncd_dev = NULL;
-        return ret;
-    }
-    ncd_dev->device = device_create(ncd_dev->class, NULL, ncd_dev->dev_num, 
-                                NULL, DEVICE_NAME);
-    if(IS_ERR(ncd_dev->device)) {
-        ret = PTR_ERR(ncd_dev->device);
-        pr_err("ncd: device_create failed\n");
-        class_destroy(ncd_dev->class);
-        kfifo_free(&ncd_dev->data_fifo);
-        cdev_del(&ncd_dev->cdev);
-        unregister_chrdev_region(ncd_dev->dev_num, 1);
-        kfree(ncd_dev);
-        ncd_dev = NULL;
-        return ret;
-    }
-
-    /* 6. Create netlink socket */
+    /* 3. Create netlink socket (devices are created later via daemon) */
     struct netlink_kernel_cfg cfg = {
         .input = recv_from_daemon,
     };
     nl_sk = netlink_kernel_create(&init_net, NETLINK_USER, &cfg);
     if(!nl_sk) {
         pr_err("ncd: netlink_kernel_create failed\n");
-        ret = -ENOMEM;
-        device_destroy(ncd_dev->class, ncd_dev->dev_num);
-        class_destroy(ncd_dev->class);
-        kfifo_free(&ncd_dev->data_fifo);
-        cdev_del(&ncd_dev->cdev);
-        unregister_chrdev_region(ncd_dev->dev_num, 1);
-        kfree(ncd_dev);
-        ncd_dev = NULL;
-        return ret;
+        class_destroy(ncd_class);
+        unregister_chrdev_region(ncd_major_dev, NCD_MAX_DEVICES);
+        return -ENOMEM;
     }
 
-    pr_info("ncd: driver initialized (major=%d, fifo=%d)\n", MAJOR(ncd_dev->dev_num), FIFO_SIZE);
+    pr_info("ncd: driver initialized (major=%d, max_devices=%d)\n",
+            MAJOR(ncd_major_dev), NCD_MAX_DEVICES);
     return 0;
 }
 
 static void __exit ncd_exit(void)
 {
-    /* 1. Release netlink socket */
+    /* 1. Release netlink socket (stops callbacks immediately) */
     if(nl_sk) {
         netlink_kernel_release(nl_sk);
         nl_sk = NULL;
     }
 
-    /* 2. Release device resources */
-    if(ncd_dev) {
-        device_destroy(ncd_dev->class, ncd_dev->dev_num);
-        class_destroy(ncd_dev->class);
-        kfifo_free(&ncd_dev->data_fifo);
-        cdev_del(&ncd_dev->cdev);
-        unregister_chrdev_region(ncd_dev->dev_num, 1);
-        kfree(ncd_dev);
-        ncd_dev = NULL;
+    /* 2. Destroy all active devices */
+    for(int i = 0; i < NCD_MAX_DEVICES; i++) {
+        struct ncd_device *dev = ncd_devices[i];
+        if(!dev || !dev->in_use) continue;
+
+        device_destroy(ncd_class, dev->dev_num);
+        kfifo_free(&dev->data_fifo);
+        cdev_del(&dev->cdev);
+        kfree(dev);
+        ncd_devices[i] = NULL;
     }
+
+    /* 3. Release class and major device number */
+    if(ncd_class) {
+        class_destroy(ncd_class);
+        ncd_class = NULL;
+    }
+    unregister_chrdev_region(ncd_major_dev, NCD_MAX_DEVICES);
 
     pr_info("ncd: driver unloaded\n");
 }

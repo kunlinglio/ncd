@@ -6,16 +6,14 @@ use std::ptr;
 
 use tokio::io::unix::AsyncFd;
 
-
-const NETLINK_USER: i32            = 31;
-pub const NCD_MSG_REGISTER: u16    = 0; // daemon→driver:  send daemon PID
-pub const NCD_MSG_OPEN_REQ: u16    = 1; // driver→daemon:  request to open device (and wait for connection)
-pub const NCD_MSG_CONN_RES: u16    = 2; // daemon→driver:  connection result (success/fail)
-pub const NCD_MSG_DATA: u16        = 3; // bi-directional: data transfer
-pub const NCD_MSG_CLOSE_REQ: u16   = 4; // driver→daemon:  request to close device
-pub const NCD_MSG_CREATE_DEV: u16  = 5; // daemon→driver:  create device
+const NETLINK_USER: i32 = 31;
+pub const NCD_MSG_REGISTER: u16 = 0; // daemon→driver:  send daemon PID
+pub const NCD_MSG_OPEN_REQ: u16 = 1; // driver→daemon:  request to open device (and wait for connection)
+pub const NCD_MSG_CONN_RES: u16 = 2; // daemon→driver:  connection result (success/fail)
+pub const NCD_MSG_DATA: u16 = 3; // bi-directional: data transfer
+pub const NCD_MSG_CLOSE_REQ: u16 = 4; // driver→daemon:  request to close device
+pub const NCD_MSG_CREATE_DEV: u16 = 5; // daemon→driver:  create device
 pub const NCD_MSG_DESTROY_DEV: u16 = 6; // daemon→driver:  destroy device
-
 
 #[repr(C)]
 struct NlMsgHdr {
@@ -34,16 +32,16 @@ struct SockAddrNl {
     nl_groups: u32,
 }
 
-const NLMSG_HDRLEN: usize = 16;  // mem::size_of::<NlMsgHdr>()
+const NLMSG_HDRLEN: usize = 16; // mem::size_of::<NlMsgHdr>()
 const RECV_BUF_SIZE: usize = 4096;
-fn nlmsg_align(len: usize) -> usize { (len + 3) & !3 }  // align to 4 bytes
-
+fn nlmsg_align(len: usize) -> usize {
+    (len + 3) & !3
+} // align to 4 bytes
 
 pub struct NetlinkSocket {
-    fd: AsyncFd<OwnedFd>,   // tokio async file descriptor
-    pid: u32,               // daemon PID (assigned by kernel)
+    fd: AsyncFd<OwnedFd>, // tokio async file descriptor
+    pid: u32,             // daemon PID (assigned by kernel)
 }
-
 
 impl NetlinkSocket {
     /// Create and bind a Netlink socket (AF_NETLINK, NETLINK_USER).
@@ -74,8 +72,8 @@ impl NetlinkSocket {
         let mut addr = SockAddrNl {
             nl_family: libc::AF_NETLINK as u16,
             nl_pad: 0,
-            nl_pid: 0,       // 0 = let kernel assign
-            nl_groups: 0,    // no multicast
+            nl_pid: 0,    // 0 = let kernel assign
+            nl_groups: 0, // no multicast
         };
         let ret = unsafe {
             libc::bind(
@@ -137,7 +135,7 @@ impl NetlinkSocket {
             match guard.try_io(|_| self.try_recv()) {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(e)) => return Err(e),
-                Err(_) => continue,          // WouldBlock → retry
+                Err(_) => continue, // WouldBlock → retry
             }
         }
     }
@@ -147,12 +145,20 @@ impl NetlinkSocket {
     /// Register this daemon with the kernel driver.
     /// Must be called first, before any other communication.
     pub async fn register(&self) -> io::Result<()> {
-        self.send_to_kernel(NCD_MSG_REGISTER, Vec::<u8>::new().as_slice()).await
+        self.send_to_kernel(NCD_MSG_REGISTER, Vec::<u8>::new().as_slice())
+            .await
     }
 
     /// Ask the driver to create a device node /dev/<name>.
     pub async fn create_device(&self, name: &str) -> io::Result<()> {
-        self.send_to_kernel(NCD_MSG_CREATE_DEV, name.as_bytes()).await
+        self.send_to_kernel(NCD_MSG_CREATE_DEV, name.as_bytes())
+            .await
+    }
+
+    /// Ask the driver to destroy a device node identified by `minor`.
+    pub async fn destroy_device(&self, minor: u8) -> io::Result<()> {
+        self.send_to_kernel(NCD_MSG_DESTROY_DEV, [minor].as_slice())
+            .await
     }
 
     /// Tell the driver whether the TCP connection for `minor` succeeded.
@@ -207,7 +213,7 @@ impl NetlinkSocket {
         let mut addr = SockAddrNl {
             nl_family: libc::AF_NETLINK as u16,
             nl_pad: 0,
-            nl_pid: 0,       // kernel
+            nl_pid: 0, // kernel
             nl_groups: 0,
         };
 
