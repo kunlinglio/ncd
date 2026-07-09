@@ -307,6 +307,7 @@ mod tests {
             for msg in device_msgs_dev {
                 write(&mut device, msg).await.unwrap();
             }
+            read(&mut device).await.unwrap_err(); // should be closed by host
             assert_close_ok(close(device).await);
         });
         let res = tokio::join!(host_future, dev_future);
