@@ -41,9 +41,6 @@ pub struct ConnStatus {
     pub role: ConnRole,
 }
 
-/// IO half of a connection — stream + decode buffers.
-/// Extracted into a sub‑struct so `select!` branches can borrow `self.io`
-/// and `self.xxx_timer` independently without conflicting on `&mut self`.
 struct IoState {
     stream: TcpStream,
     byte_buffer: BytesMut,
@@ -430,8 +427,15 @@ impl Connection {
                         // Peer has already closed, we can ignore this request
                         break;
                     }
+                    Ok(Request::GetStatus) => {
+                        let _ = self.status_response_tx.try_send(ConnStatus {
+                            state: self.state.clone(),
+                            latest_rtt: self.latest_rtt,
+                            peer_addr: self.peer_addr,
+                            role: self.role.clone(),
+                        });
+                    }
                     Err(_) => break,
-                    _ => continue,
                 }
             }
             self.io.send_packet(&Packet::ControlClose).await?;
@@ -526,6 +530,20 @@ pub struct ConnHandler {
     packet_response_rx: mpsc::Receiver<Packet>,
     status_response_rx: mpsc::Receiver<ConnStatus>,
     task_handle: TaskState,
+}
+
+impl Drop for ConnHandler {
+    fn drop(&mut self) {
+        #[cfg(not(test))]
+        {
+            // TODO: Maybe we should handle drop more gracefully, but for now, we want to ensure that users explicitly call close() before dropping the handler.
+            if !matches!(self.task_handle, TaskState::Finished(_)) {
+                panic!(
+                    "ConnHandler should be closed explicitly by calling close() before dropping"
+                );
+            }
+        }
+    }
 }
 
 /// TODO: Here we check task state only when user call methods, we may need to check task state in background and notify user when task is finished
@@ -850,5 +868,4 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }
-
 }

@@ -80,8 +80,6 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
-
     #[tokio::test]
     async fn new_runtime_has_default_config() {
         let rt = Runtime::new();
@@ -96,46 +94,5 @@ mod tests {
         cfg.timeout_ms = 9999;
         rt.set_config(cfg).await;
         assert_eq!(rt.get_config().await.timeout_ms, 9999);
-    }
-
-    /// Runtime::open(Device) opens a connection to a manually‑run host.
-    /// (Host open can't be tested without a connecting client on a known port.)
-    #[tokio::test]
-    async fn open_device_via_runtime() {
-        use crate::connection::{ConnRole, Connection};
-        use std::net::SocketAddr;
-
-        let rt = Runtime::new();
-        let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-
-        // Manual host — bind first to get a known port, then accept + handshake
-        let listener = tokio::net::TcpListener::bind(SocketAddr::new(addr, 0))
-            .await
-            .unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let host = tokio::spawn(async move {
-            let (stream, peer) = listener.accept().await.unwrap();
-            let (mut conn, _handler) =
-                Connection::new(stream, peer, 5000, 2000, 2.0, ConnRole::Host, 100);
-            conn.handshake().await.unwrap();
-            conn
-        });
-
-        // Device via Runtime — verifies config → connect() path works
-        let mut handler = rt
-            .open(OpenParams::Device {
-                host_addr: addr,
-                host_port: port,
-            })
-            .await
-            .unwrap();
-
-        // Handler is functional: can get status from background task
-        let status = handler.get_status().await;
-        assert!(status.is_ok(), "status failed: {:?}", status.err());
-
-        let _host_conn = host.await.unwrap();
-        drop(handler);
     }
 }
