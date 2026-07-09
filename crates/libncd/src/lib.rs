@@ -9,4 +9,4 @@ pub(crate) const MAGIC_NUMBER: &[u8; 3] = b"NCD";
 pub(crate) const VERSION: u8 = 1;
 pub(crate) const MAX_PAYLOAD_SIZE: usize = u16::MAX as usize;
 
-pub use codec::{frames_to_packet, packet_to_frames};
+pub use codec::{fragment_packet, try_assemble_packet};

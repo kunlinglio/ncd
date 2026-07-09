@@ -7,6 +7,8 @@ use crate::error::{Error, FrameDecodeError};
 /// |       Magic Number       | Version |
 /// |  Payload Length  |  Flag |  Type   |
 /// |         Payload (variable)         |
+///
+/// Note: All numbers in NCD Protocol is encoded in Big Endian
 #[derive(Debug, PartialEq, Eq)]
 pub struct Frame {
     // Magic Number and Version are handled by encoding/decoding functions
@@ -43,9 +45,12 @@ impl TryFrom<u8> for Flag {
 }
 
 impl Frame {
-    /// TODO: Optimize memory allocation
-    pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(HEADER_SIZE + self.payload.len());
+    /// Encode the Frame into a byte vector buffer.
+    /// This method will clear the provided buffer and fill it with the encoded frame data.
+    pub fn encode(&self, buf: &mut Vec<u8>) {
+        buf.clear();
+        buf.reserve(HEADER_SIZE + self.payload.len());
+
         buf.extend_from_slice(MAGIC_NUMBER); // 24 bit
         buf.extend_from_slice(&VERSION.to_be_bytes()); // 8 bit
         assert!(
@@ -57,11 +62,10 @@ impl Frame {
         let length = self.payload.len() as u16;
         buf.extend_from_slice(&length.to_be_bytes()); // 16 bit
         buf.push(self.flag as u8); // 8 bit
-        buf.push(self.ty); // 8 bit
+        buf.push(self.ty as u8); // 8 bit
         assert_eq!(buf.len(), HEADER_SIZE);
 
         buf.extend_from_slice(&self.payload);
-        buf
     }
 
     pub fn decode(src: &[u8]) -> Result<Self, Error> {
@@ -74,14 +78,14 @@ impl Frame {
         };
 
         let expected_total_length = HEADER_SIZE + length;
-        if src.len() < HEADER_SIZE + length {
+        if src.len() < expected_total_length {
             return Err(FrameDecodeError::DataTooShort {
                 expected: expected_total_length,
                 got: src.len(),
             }
             .into());
         }
-        let payload = src[HEADER_SIZE..HEADER_SIZE + length].to_vec();
+        let payload = src[HEADER_SIZE..expected_total_length].to_vec();
 
         Ok(Frame { flag, ty, payload })
     }
@@ -126,7 +130,8 @@ mod tests {
             ty: 0x01,
             payload: vec![],
         };
-        let bytes = frame.encode();
+        let mut bytes = Vec::new();
+        frame.encode(&mut bytes);
         let decoded = Frame::decode(&bytes).unwrap();
         assert_eq!(decoded, frame);
     }
@@ -138,7 +143,8 @@ mod tests {
             ty: 0x06,
             payload: b"hello world".to_vec(),
         };
-        let bytes = frame.encode();
+        let mut bytes = Vec::new();
+        frame.encode(&mut bytes);
         let decoded = Frame::decode(&bytes).unwrap();
         assert_eq!(decoded, frame);
     }
@@ -150,7 +156,8 @@ mod tests {
             ty: 0x06,
             payload: vec![0xAA; 1024],
         };
-        let bytes = frame.encode();
+        let mut bytes = Vec::new();
+        frame.encode(&mut bytes);
         let decoded = Frame::decode(&bytes).unwrap();
         assert_eq!(decoded, frame);
     }
@@ -162,7 +169,8 @@ mod tests {
             ty: 0x06,
             payload: vec![0xBB; MAX_PAYLOAD_SIZE],
         };
-        let bytes = frame.encode();
+        let mut bytes = Vec::new();
+        frame.encode(&mut bytes);
         assert_eq!(bytes.len(), HEADER_SIZE + MAX_PAYLOAD_SIZE);
         let decoded = Frame::decode(&bytes).unwrap();
         assert_eq!(decoded, frame);
@@ -175,7 +183,8 @@ mod tests {
             ty: 0x04,
             payload: vec![0x00, 0x00, 0x00, 0x2A], // id = 42
         };
-        let bytes = frame.encode();
+        let mut bytes = Vec::new();
+        frame.encode(&mut bytes);
         let Some((ty, flag, payload_len)) = Frame::peek_head(&bytes).unwrap() else {
             panic!("Failed to peek at frame header");
         };
@@ -191,7 +200,8 @@ mod tests {
             ty: 0x01,
             payload: vec![],
         };
-        let bytes = frame.encode();
+        let mut bytes = Vec::new();
+        frame.encode(&mut bytes);
         let Some((_, _, payload_len)) = Frame::peek_head(&bytes).unwrap() else {
             panic!("Failed to peek at frame header");
         };

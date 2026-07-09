@@ -9,7 +9,7 @@ const CONTROL_PONG_TAG: u8 = 0x06;
 const DATA_TAG: u8 = 0x07;
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Packet {
     ControlHello { keep_alive_interval_ms: u32 } = CONTROL_HELLO_TAG,
     ControlHelloAck { keep_alive_interval_ms: u32 } = CONTROL_HELLO_ACK_TAG,
@@ -59,10 +59,11 @@ impl Packet {
         }
     }
 
-    /// TODO: Optimize memory allocation
-    pub(crate) fn encode(&self) -> (u8, Vec<u8>) {
-        let tag = self.tag();
-        let payload = match self {
+    /// This function transfer a packet into a tag and payload,
+    /// so it will consumed the packet.
+    pub(crate) fn encode(packet: Self) -> (u8, Vec<u8>) {
+        let tag = packet.tag();
+        let payload = match packet {
             Self::ControlHello {
                 keep_alive_interval_ms,
             } => keep_alive_interval_ms.to_be_bytes().to_vec(),
@@ -72,7 +73,7 @@ impl Packet {
             Self::ControlClose | Self::ControlKeepAlive => vec![],
             Self::ControlPing { id } => id.to_be_bytes().to_vec(),
             Self::ControlPong { id } => id.to_be_bytes().to_vec(),
-            Self::Data(data) => data.clone(),
+            Self::Data(data) => data,
         };
         (tag, payload)
     }
@@ -120,7 +121,7 @@ mod tests {
         let pkt = Packet::ControlHello {
             keep_alive_interval_ms: 1000,
         };
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -130,7 +131,7 @@ mod tests {
         let pkt = Packet::ControlHelloAck {
             keep_alive_interval_ms: 2500,
         };
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn roundtrip_close() {
         let pkt = Packet::ControlClose;
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -146,7 +147,7 @@ mod tests {
     #[test]
     fn roundtrip_keepalive() {
         let pkt = Packet::ControlKeepAlive;
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -154,7 +155,7 @@ mod tests {
     #[test]
     fn roundtrip_ping() {
         let pkt = Packet::ControlPing { id: 42 };
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -162,7 +163,7 @@ mod tests {
     #[test]
     fn roundtrip_pong() {
         let pkt = Packet::ControlPong { id: 99 };
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -170,7 +171,7 @@ mod tests {
     #[test]
     fn roundtrip_data() {
         let pkt = Packet::Data(b"hello world".to_vec());
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }
@@ -178,7 +179,7 @@ mod tests {
     #[test]
     fn roundtrip_empty_data() {
         let pkt = Packet::Data(vec![]);
-        let (ty, body) = pkt.encode();
+        let (ty, body) = Packet::encode(pkt.clone());
         let decoded = Packet::decode(ty, &body).unwrap();
         assert_eq!(decoded, pkt);
     }

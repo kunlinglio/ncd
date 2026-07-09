@@ -1,58 +1,61 @@
+use crate::MAX_PAYLOAD_SIZE;
 use crate::error::{AssemblePacketError, Error};
-
-use super::MAX_PAYLOAD_SIZE;
-use super::frame::{Flag, Frame};
-use super::packet::Packet;
+use crate::frame::{Flag, Frame};
+use crate::packet::Packet;
 
 /// Fragment a Packet into multiple Frames if necessary, based on the maximum payload size.
-pub fn packet_to_frames(packet: &Packet) -> Vec<Frame> {
+/// The buf will be replaced by returned frames.
+/// This will consumed Packet for performance.
+pub fn fragment_packet(packet: Packet, buf: &mut Vec<Frame>) {
+    buf.clear();
     let payload_length = packet.length();
     if payload_length <= MAX_PAYLOAD_SIZE {
-        let (ty, payload) = packet.encode();
-        vec![Frame {
+        buf.reserve(1);
+        let (ty, payload) = Packet::encode(packet);
+        buf.push(Frame {
             flag: Flag::End,
             ty,
             payload,
-        }]
+        });
     } else {
-        let mut frames = Vec::new();
-        let mut offset = 0;
-        let (ty, bytes) = packet.encode();
+        let frame_num = (payload_length + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
+        buf.reserve(frame_num);
+        let (ty, bytes) = Packet::encode(packet);
         assert_eq!(bytes.len(), payload_length, "Packet length mismatch");
-        while offset < payload_length {
-            let remaining = payload_length - offset;
-            let chunk_size = std::cmp::min(remaining, MAX_PAYLOAD_SIZE);
-            let chunk_payload = bytes[offset..offset + chunk_size].to_vec();
-            let flag = if remaining > chunk_size {
-                Flag::More
-            } else {
-                Flag::End
-            };
-            frames.push(Frame {
-                flag,
-                ty,
-                payload: chunk_payload,
+        bytes
+            .chunks(MAX_PAYLOAD_SIZE)
+            .enumerate()
+            .for_each(|(i, chunk)| {
+                let flag = if i == frame_num - 1 {
+                    Flag::End
+                } else {
+                    Flag::More
+                };
+                buf.push(Frame {
+                    flag,
+                    ty,
+                    payload: chunk.to_vec(),
+                });
             });
-            offset += chunk_size;
-        }
-        frames
+        assert_eq!(buf.len(), frame_num, "Frame count mismatch");
     }
 }
 
 /// Reassembles a Packet from a sequence of Frames
 /// Returns: (consumed_frames, Packet)
-pub fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Error> {
-    if frames.is_empty() {
+pub fn try_assemble_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Error> {
+    // Verify and calculate the range
+    let Some(end) = frames.iter().position(|f| f.flag == Flag::End) else {
         return Ok(None);
-    }
+    };
+    let frames = &frames[0..=end];
 
-    let first_frame = &frames[0];
-    let ty = first_frame.ty;
-    let mut payload = Vec::new();
+    // Calculate buffer size
+    let buffer_size: usize = frames.iter().map(|f| f.payload.len()).sum();
 
-    let mut consumed_frames = 0;
-    let mut finished_packet = false;
-    for frame in frames {
+    let ty = frames[0].ty; // if slice are empty, the function will returned above, so this is safe
+    let mut payload = Vec::with_capacity(buffer_size);
+    for frame in &frames[0..=end] {
         if frame.ty != ty {
             return Err(AssemblePacketError::MismatchedTypes {
                 first_frame_type: ty,
@@ -61,18 +64,9 @@ pub fn frames_to_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, Err
             .into());
         }
         payload.extend_from_slice(&frame.payload);
-        consumed_frames += 1;
-        if frame.flag == Flag::End {
-            finished_packet = true;
-            break;
-        }
     }
-    if !finished_packet {
-        return Ok(None);
-    }
-
     let packet = Packet::decode(ty, &payload)?;
-    Ok(Some((consumed_frames, packet)))
+    Ok(Some((end + 1, packet)))
 }
 
 #[cfg(test)]
@@ -86,12 +80,12 @@ mod tests {
             ty: 0x06,
             payload: b"partial".to_vec(),
         }];
-        assert!(frames_to_packet(&frames).unwrap().is_none());
+        assert!(try_assemble_packet(&frames).unwrap().is_none());
     }
 
     #[test]
     fn frames_to_packet_empty_returns_none() {
-        assert!(frames_to_packet(&[]).unwrap().is_none());
+        assert!(try_assemble_packet(&[]).unwrap().is_none());
     }
 
     #[test]
@@ -109,7 +103,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            frames_to_packet(&frames).unwrap_err(),
+            try_assemble_packet(&frames).unwrap_err(),
             Error::AssemblePacketError(AssemblePacketError::MismatchedTypes {
                 first_frame_type: 0x01,
                 frame_type: 0x06,
