@@ -5,10 +5,10 @@ edition = "2024"
 
 [dependencies]
 libncd = { path = "../libncd" }
-tokio = { workspace = true }
-thiserror = { workspace = true }
-bytes = "1.12.0"
-rand = "0.10.2"
+tokio.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.6", features = ["async_tokio"] }
