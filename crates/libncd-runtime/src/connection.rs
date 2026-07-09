@@ -248,8 +248,8 @@ impl Connection {
 
     /// Main event loop for this connection
     async fn run(&mut self) -> Result<(), ConnectionError> {
+        self.ping_peer().await?; // Ping peer after entering the main loop
         while self.state == ConnState::Connected {
-            self.ping_peer().await?; // Ping peer after running the loop
             select! {
                 _ = async {
                     self.keep_alive_timer
