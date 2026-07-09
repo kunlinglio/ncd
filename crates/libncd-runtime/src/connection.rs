@@ -245,19 +245,33 @@ impl Connection {
     async fn run(&mut self) -> Result<(), ConnectionError> {
         while self.state == ConnState::Connected {
             select! {
-                // Handle timers
-                Some(ref mut timer) = async { self.keep_alive_timer.as_mut() }, if self.keep_alive_timer.is_some() => {
-                    timer.tick().await;
+                _ = async {
+                    self.keep_alive_timer
+                        .as_mut()
+                        .unwrap()
+                        .tick()
+                        .await
+                }, if self.keep_alive_timer.is_some() => {
                     self.io.send_packet(&Packet::ControlKeepAlive).await?;
                 }
-                Some(ref mut timer) = async { self.peer_query_active_timer.as_mut() }, if self.peer_query_active_timer.is_some() => {
-                    timer.tick().await;
+                _ = async {
+                    self.peer_query_active_timer
+                        .as_mut()
+                        .unwrap()
+                        .tick()
+                        .await
+                }, if self.peer_query_active_timer.is_some() => {
                     let id = rand::random::<u32>();
                     self.ping_timers.insert(id, Instant::now());
                     self.io.send_packet(&Packet::ControlPing { id }).await?;
                 }
-                Some(ref mut timer) = async { self.peer_active_timeout_timer.as_mut() }, if self.peer_active_timeout_timer.is_some() => {
-                    timer.tick().await;
+                _ = async {
+                    self.peer_active_timeout_timer
+                        .as_mut()
+                        .unwrap()
+                        .tick()
+                        .await
+                }, if self.peer_active_timeout_timer.is_some() => {
                     // TODO: Implement retry logic
                     self.close_inner(false).await?;
                     return Err(ConnectionError::PeerInactiveTimeout);
