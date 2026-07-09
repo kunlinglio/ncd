@@ -8,9 +8,10 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{select, time};
 
-use libncd::frame::{self, Frame};
+use libncd::frame;
+use libncd::frame::Frame;
 use libncd::packet::Packet;
-use libncd::{frames_to_packet, packet_to_frames};
+use libncd::{fragment_packet, try_assemble_packet};
 
 use crate::error::{ConnectionClosed, ConnectionCreateError, ConnectionError};
 
@@ -46,6 +47,9 @@ struct IoState {
     byte_buffer: BytesMut,
     frame_buffer: VecDeque<Frame>,
     packet_buffer: VecDeque<Packet>,
+    // Pre-allocated buffers
+    prealloc_frame_buffer: Vec<Frame>,
+    prealloc_send_buffer: Vec<u8>,
 }
 
 pub(crate) struct Connection {
@@ -72,15 +76,14 @@ pub(crate) struct Connection {
 }
 
 impl IoState {
-    async fn send_packet(&mut self, packet: &Packet) -> Result<(), ConnectionError> {
-        let frames = packet_to_frames(packet);
-        let mut buf = vec![];
-        for frame in frames {
-            let bytes = frame.encode();
-            buf.extend_from_slice(&bytes);
+    async fn send_packet(&mut self, packet: Packet) -> Result<(), ConnectionError> {
+        fragment_packet(packet, &mut self.prealloc_frame_buffer);
+        self.prealloc_send_buffer.clear();
+        for frame in &self.prealloc_frame_buffer {
+            Frame::encode(frame, &mut self.prealloc_send_buffer);
         }
         self.stream
-            .write_all(&buf)
+            .write_all(&self.prealloc_send_buffer)
             .await
             .map_err(ConnectionError::from)?;
         Ok(())
@@ -125,7 +128,7 @@ impl IoState {
                 // TODO: Optimize O(n) memory copy
                 let contiguous = self.frame_buffer.make_contiguous();
                 let Some(res) =
-                    frames_to_packet(contiguous).map_err(ConnectionError::ProtocolError)?
+                    try_assemble_packet(contiguous).map_err(ConnectionError::ProtocolError)?
                 else {
                     break;
                 };
@@ -159,6 +162,8 @@ impl Connection {
                     byte_buffer: BytesMut::new(),
                     frame_buffer: VecDeque::new(),
                     packet_buffer: VecDeque::new(),
+                    prealloc_frame_buffer: Vec::new(),
+                    prealloc_send_buffer: Vec::new(),
                 },
                 peer_query_active_timer: None,
                 peer_active_timeout_timer: None,
@@ -253,7 +258,7 @@ impl Connection {
                         .tick()
                         .await
                 }, if self.keep_alive_timer.is_some() => {
-                    self.io.send_packet(&Packet::ControlKeepAlive).await?;
+                    self.io.send_packet(Packet::ControlKeepAlive).await?;
                 }
                 _ = async {
                     self.peer_query_active_timer
@@ -290,7 +295,7 @@ impl Connection {
                             break;
                         }
                         Request::Send(packet) => {
-                            self.io.send_packet(&packet).await?;
+                            self.io.send_packet(packet).await?;
                         }
                         Request::GetStatus => {
                             let status = ConnStatus {
@@ -318,7 +323,7 @@ impl Connection {
             ConnRole::Device => {
                 // Device need to send ControlHello
                 self.io
-                    .send_packet(&Packet::ControlHello {
+                    .send_packet(Packet::ControlHello {
                         keep_alive_interval_ms,
                     })
                     .await
@@ -356,7 +361,7 @@ impl Connection {
                 };
                 // Send ControlHelloAck back to Device
                 self.io
-                    .send_packet(&Packet::ControlHelloAck {
+                    .send_packet(Packet::ControlHelloAck {
                         keep_alive_interval_ms,
                     })
                     .await?;
@@ -386,7 +391,7 @@ impl Connection {
     async fn ping_peer(&mut self) -> Result<(), ConnectionError> {
         let id = rand::random::<u32>();
         self.ping_timers.insert(id, Instant::now());
-        self.io.send_packet(&Packet::ControlPing { id }).await?;
+        self.io.send_packet(Packet::ControlPing { id }).await?;
         Ok(())
     }
 
@@ -399,7 +404,7 @@ impl Connection {
             .map(|timer| timer.reset());
         match packet {
             Packet::ControlPing { id } => {
-                self.io.send_packet(&Packet::ControlPong { id }).await?;
+                self.io.send_packet(Packet::ControlPong { id }).await?;
             }
             Packet::ControlPong { id } => {
                 if let Some(sent_time) = self.ping_timers.remove(&id) {
@@ -441,7 +446,7 @@ impl Connection {
             loop {
                 match self.request_rx.try_recv() {
                     Ok(Request::Send(packet)) => {
-                        self.io.send_packet(&packet).await?;
+                        self.io.send_packet(packet).await?;
                     }
                     Ok(Request::Close) => {
                         // Peer has already closed, we can ignore this request
@@ -458,7 +463,7 @@ impl Connection {
                     Err(_) => break,
                 }
             }
-            self.io.send_packet(&Packet::ControlClose).await?;
+            self.io.send_packet(Packet::ControlClose).await?;
             self.io
                 .stream
                 .flush()
@@ -472,7 +477,7 @@ impl Connection {
             self.switch_to(ConnState::Closed);
         } else {
             // We initiated the close, so we should not have more data to send
-            self.io.send_packet(&Packet::ControlClose).await?;
+            self.io.send_packet(Packet::ControlClose).await?;
             self.io
                 .stream
                 .flush()
@@ -609,12 +614,12 @@ impl ConnHandler {
         }
     }
 
-    pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<(), ConnectionClosed> {
+    pub(crate) async fn write(&mut self, bytes: Vec<u8>) -> Result<(), ConnectionClosed> {
         let state = self.check_task_state().await;
         if let Some(closed) = state {
             return Err(closed);
         }
-        let packet = Packet::Data(bytes.to_vec());
+        let packet = Packet::Data(bytes);
         self.request_tx
             .send(Request::Send(packet))
             .await
@@ -755,7 +760,7 @@ mod tests {
         let payload = b"hello ncd";
         device
             .io
-            .send_packet(&Packet::Data(payload.to_vec()))
+            .send_packet(Packet::Data(payload.to_vec()))
             .await
             .unwrap();
 
@@ -770,7 +775,7 @@ mod tests {
         let ping_id = 42u32;
         device
             .io
-            .send_packet(&Packet::ControlPing { id: ping_id })
+            .send_packet(Packet::ControlPing { id: ping_id })
             .await
             .unwrap();
 
@@ -791,7 +796,7 @@ mod tests {
             .map(|i| Packet::Data(format!("msg-{}", i).into_bytes()))
             .collect();
 
-        for pkt in &packets {
+        for pkt in packets.clone() {
             host.io.send_packet(pkt).await.unwrap();
         }
 
@@ -807,7 +812,7 @@ mod tests {
 
         device
             .io
-            .send_packet(&Packet::ControlKeepAlive)
+            .send_packet(Packet::ControlKeepAlive)
             .await
             .unwrap();
 

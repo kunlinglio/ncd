@@ -49,7 +49,7 @@ pub async fn read(conn: &mut ConnHandler) -> Result<Vec<u8>, ConnectionClosed> {
 /// Note: Unlike TCP, NCD guarantees that this message will be sent as a single Packet,
 ///       and will be received as a single message on the other end.
 /// Note: If peer closed connection, NCD does not guarantee that peer will receive the message.
-pub async fn write(conn: &mut ConnHandler, message: &[u8]) -> Result<(), ConnectionClosed> {
+pub async fn write(conn: &mut ConnHandler, message: Vec<u8>) -> Result<(), ConnectionClosed> {
     conn.write(message).await
 }
 
@@ -138,11 +138,13 @@ mod tests {
         // Create host and device connections
         let (mut host, mut device) = gen_conn_handlers().await;
         // Host sends a message to device
-        write(&mut host, b"Hello from host").await.unwrap();
+        write(&mut host, b"Hello from host".to_vec()).await.unwrap();
         let msg = read(&mut device).await.unwrap();
         assert_eq!(msg, b"Hello from host");
         // Device sends a message to host
-        write(&mut device, b"Hello from device").await.unwrap();
+        write(&mut device, b"Hello from device".to_vec())
+            .await
+            .unwrap();
         let msg = read(&mut host).await.unwrap();
         assert_eq!(msg, b"Hello from device");
         // Close connections
@@ -222,7 +224,7 @@ mod tests {
             .await
             .unwrap();
             for msg in host_msgs_host {
-                write(&mut host, &msg).await.unwrap();
+                write(&mut host, msg).await.unwrap();
             }
             for msg in device_msgs_host {
                 let received = read(&mut host).await.unwrap();
@@ -240,7 +242,7 @@ mod tests {
             .await
             .unwrap();
             for msg in device_msgs_dev {
-                write(&mut device, &msg).await.unwrap();
+                write(&mut device, msg).await.unwrap();
             }
             for msg in host_msgs_dev {
                 let received = read(&mut device).await.unwrap();
@@ -257,14 +259,14 @@ mod tests {
     async fn connection_big_package_transfer() {
         let port = pick_free_port().await;
         // generate big packages
-        let host_msgs: Vec<Vec<u8>> = (0..25)
+        let host_msgs: Vec<Vec<u8>> = (0..255)
             .map(|i| {
                 let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB
                 msg[0] = i;
                 msg
             })
             .collect();
-        let device_msgs: Vec<Vec<u8>> = (0..25)
+        let device_msgs: Vec<Vec<u8>> = (0..255)
             .map(|i| {
                 let mut msg = vec![0u8; 10 * 1024 * 1024]; // 1MB
                 msg[0] = i;
@@ -281,7 +283,7 @@ mod tests {
             .await
             .unwrap();
             for msg in host_msgs_host {
-                write(&mut host, &msg).await.unwrap();
+                write(&mut host, msg).await.unwrap();
             }
             for msg in device_msgs_host {
                 let received = read(&mut host).await.unwrap();
@@ -303,7 +305,7 @@ mod tests {
                 assert_eq!(received, msg);
             }
             for msg in device_msgs_dev {
-                write(&mut device, &msg).await.unwrap();
+                write(&mut device, msg).await.unwrap();
             }
             assert_close_ok(close(device).await);
         });

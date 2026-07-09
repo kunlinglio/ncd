@@ -78,7 +78,7 @@ impl Packet {
         (tag, payload)
     }
 
-    pub(crate) fn decode(tag: u8, src: &[u8]) -> Result<Self, Error> {
+    pub(crate) fn decode(tag: u8, src: Vec<u8>) -> Result<Self, Error> {
         let expected_length = Self::fixed_length(tag);
         if let Some(expected_length) = expected_length {
             if src.len() != expected_length {
@@ -105,7 +105,7 @@ impl Packet {
             CONTROL_PONG_TAG => Ok(Self::ControlPong {
                 id: u32::from_be_bytes([src[0], src[1], src[2], src[3]]),
             }),
-            DATA_TAG => Ok(Self::Data(src.to_vec())),
+            DATA_TAG => Ok(Self::Data(src)),
             _ => Err(PacketDecodeError::UnknownTag(tag)),
         }?;
         Ok(typed_payload)
@@ -122,7 +122,7 @@ mod tests {
             keep_alive_interval_ms: 1000,
         };
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -132,7 +132,7 @@ mod tests {
             keep_alive_interval_ms: 2500,
         };
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -140,7 +140,7 @@ mod tests {
     fn roundtrip_close() {
         let pkt = Packet::ControlClose;
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -148,7 +148,7 @@ mod tests {
     fn roundtrip_keepalive() {
         let pkt = Packet::ControlKeepAlive;
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -156,7 +156,7 @@ mod tests {
     fn roundtrip_ping() {
         let pkt = Packet::ControlPing { id: 42 };
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -164,7 +164,7 @@ mod tests {
     fn roundtrip_pong() {
         let pkt = Packet::ControlPong { id: 99 };
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -172,7 +172,7 @@ mod tests {
     fn roundtrip_data() {
         let pkt = Packet::Data(b"hello world".to_vec());
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
@@ -180,13 +180,13 @@ mod tests {
     fn roundtrip_empty_data() {
         let pkt = Packet::Data(vec![]);
         let (ty, body) = Packet::encode(pkt.clone());
-        let decoded = Packet::decode(ty, &body).unwrap();
+        let decoded = Packet::decode(ty, body).unwrap();
         assert_eq!(decoded, pkt);
     }
 
     #[test]
     fn decode_rejects_short_ping() {
-        let err = Packet::decode(CONTROL_PING_TAG, &[0x00, 0x00, 0x00]).unwrap_err();
+        let err = Packet::decode(CONTROL_PING_TAG, vec![0x00, 0x00, 0x00]).unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_short_pong() {
-        let err = Packet::decode(CONTROL_PONG_TAG, &[0x00]).unwrap_err();
+        let err = Packet::decode(CONTROL_PONG_TAG, vec![0x00]).unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_tag() {
-        let err = Packet::decode(0xFF, &[]).unwrap_err();
+        let err = Packet::decode(0xFF, vec![]).unwrap_err();
         assert!(
             matches!(
                 &err,

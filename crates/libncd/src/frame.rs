@@ -45,10 +45,11 @@ impl TryFrom<u8> for Flag {
 }
 
 impl Frame {
-    /// Encode the Frame into a byte vector buffer.
-    /// This method will clear the provided buffer and fill it with the encoded frame data.
+    /// Encode the Frame and append its wire representation to `buf`.
+    /// The caller must call `buf.clear()` before the first frame when
+    /// replacing (rather than appending to) existing buffer contents.
     pub fn encode(&self, buf: &mut Vec<u8>) {
-        buf.clear();
+        let header_start = buf.len();
         buf.reserve(HEADER_SIZE + self.payload.len());
 
         buf.extend_from_slice(MAGIC_NUMBER); // 24 bit
@@ -63,7 +64,7 @@ impl Frame {
         buf.extend_from_slice(&length.to_be_bytes()); // 16 bit
         buf.push(self.flag as u8); // 8 bit
         buf.push(self.ty as u8); // 8 bit
-        assert_eq!(buf.len(), HEADER_SIZE);
+        assert_eq!(buf.len(), header_start + HEADER_SIZE);
 
         buf.extend_from_slice(&self.payload);
     }

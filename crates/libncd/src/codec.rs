@@ -65,7 +65,7 @@ pub fn try_assemble_packet(frames: &[Frame]) -> Result<Option<(usize, Packet)>, 
         }
         payload.extend_from_slice(&frame.payload);
     }
-    let packet = Packet::decode(ty, &payload)?;
+    let packet = Packet::decode(ty, payload)?;
     Ok(Some((end + 1, packet)))
 }
 
@@ -109,5 +109,41 @@ mod tests {
                 frame_type: 0x06,
             })
         ));
+    }
+
+    #[test]
+    fn roundtrip_large_payload_fragment_assemble() {
+        let payload = vec![0xBB; MAX_PAYLOAD_SIZE * 10];
+        let packet = Packet::Data(payload);
+
+        let mut frames = Vec::new();
+        fragment_packet(packet, &mut frames);
+        assert!(frames.len() > 1, "Large payload must be fragmented");
+        let mut wire = Vec::new();
+        for frame in &frames {
+            Frame::encode(frame, &mut wire);
+        }
+
+        let mut decoded_frames = Vec::new();
+        let mut offset = 0;
+        while offset < wire.len() {
+            let Some((_, _, payload_len)) = Frame::peek_head(&wire[offset..]).unwrap() else {
+                break;
+            };
+            let frame_len = crate::frame::HEADER_SIZE + payload_len;
+            let frame = Frame::decode(&wire[offset..offset + frame_len]).unwrap();
+            decoded_frames.push(frame);
+            offset += frame_len;
+        }
+        let (consumed, assembled) = try_assemble_packet(&decoded_frames)
+            .unwrap()
+            .expect("Should assemble");
+        assert_eq!(consumed, frames.len());
+
+        let Packet::Data(data) = assembled else {
+            panic!("Expected Data packet");
+        };
+        assert_eq!(data.len(), MAX_PAYLOAD_SIZE * 10);
+        assert_eq!(data, vec![0xBB; MAX_PAYLOAD_SIZE * 10]);
     }
 }
