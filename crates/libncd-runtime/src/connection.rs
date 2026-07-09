@@ -541,14 +541,8 @@ pub struct ConnHandler {
 
 impl Drop for ConnHandler {
     fn drop(&mut self) {
-        #[cfg(not(test))]
-        {
-            // TODO: Maybe we should handle drop more gracefully, but for now, we want to ensure that users explicitly call close() before dropping the handler.
-            if !matches!(self.task_handle, TaskState::Finished(_)) {
-                panic!(
-                    "ConnHandler should be closed explicitly by calling close() before dropping"
-                );
-            }
+        if let TaskState::Running(handle) = &self.task_handle {
+            handle.abort();
         }
     }
 }
