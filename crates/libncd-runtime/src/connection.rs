@@ -463,14 +463,7 @@ impl Connection {
                 .shutdown()
                 .await
                 .map_err(ConnectionError::from)?;
-            // TODO: Replace this guard with a more graceful check
-            let buf = &mut [0u8; 8];
-            let remaining = self.io.stream.read(buf).await?;
-            if remaining == 0 {
-                self.switch_to(ConnState::Closed);
-            } else {
-                panic!("Peer sent data after ControlClose, which is a protocol violation");
-            }
+            self.switch_to(ConnState::Closed);
         } else {
             // We initiated the close, so we should not have more data to send
             self.io.send_packet(&Packet::ControlClose).await?;
@@ -653,7 +646,9 @@ impl ConnHandler {
         }
     }
 
-    pub(crate) async fn close(&mut self) -> Result<Result<(), ConnectionError>, ConnectionClosed> {
+    pub(crate) async fn close(
+        &mut self,
+    ) -> Result<Result<Vec<Vec<u8>>, ConnectionError>, ConnectionClosed> {
         let state = self.check_task_state().await;
         if let Some(closed) = state {
             return Err(closed);
@@ -667,16 +662,27 @@ impl ConnHandler {
             TaskState::Running(handle) => {
                 let res = handle.await.expect("Join should not be failed");
                 self.task_handle = TaskState::Finished(res.clone());
-                Ok(res)
+                if let Err(e) = res {
+                    return Ok(Err(e.clone()));
+                }
             }
-            TaskState::Finished(res) => match res {
-                Ok(()) => Ok(Ok(())),
-                Err(e) => Ok(Err(e.clone())),
-            },
+            TaskState::Finished(res) => {
+                if let Err(e) = res {
+                    return Ok(Err(e.clone()));
+                }
+            }
             TaskState::Uninitialized => {
                 unreachable!("Task should be initialized before calling close")
             }
+        };
+        // Packed and returned all messages in packet_response_rx
+        let mut messages = Vec::new();
+        while let Ok(packet) = self.packet_response_rx.try_recv() {
+            if let Packet::Data(data) = packet {
+                messages.push(data);
+            }
         }
+        return Ok(Ok(messages));
     }
 }
 

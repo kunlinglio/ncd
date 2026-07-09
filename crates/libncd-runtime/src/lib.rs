@@ -22,29 +22,34 @@ fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new())
 }
 
-/// Open a connection by connect to a host or listen for a device connection.
+/// Open a connection by connecting to a host or listening for a device connection.
 pub async fn open(params: OpenParams) -> Result<ConnHandler, ConnectionCreateError> {
     get_runtime().open(params).await
 }
 
 /// Close the connection gracefully.
-/// Returns Ok(Res) where Res is the result of the connection task,
-/// or Err if the connection task has already finished.
-pub async fn close(mut conn: ConnHandler) -> Result<Result<(), ConnectionError>, ConnectionClosed> {
+/// Returns:
+/// - If close operation success, returns Ok(res)
+///     - res is Ok(remaining_messages) if the connection is closed normally,
+///     - res is Err(ConnectionError) if the connection is closed due to error.
+/// - If close operation fails, returns Err(ConnectionClosed)
+pub async fn close(
+    mut conn: ConnHandler,
+) -> Result<Result<Vec<Vec<u8>>, ConnectionError>, ConnectionClosed> {
     conn.close().await
 }
 
 /// Read a sequence of bytes.
-/// Guarantees that this bytes is send by peer in a single time.
+/// Note: Unlike TCP, NCD guarantees that this message is sent by peer in a single time.
 pub async fn read(conn: &mut ConnHandler) -> Result<Vec<u8>, ConnectionClosed> {
     conn.read().await
 }
 
 /// Write a sequence of bytes.
-/// Guarantees that this bytes will be sent as a single Packet,
-/// and will be received as a single Packet on the other end.
-pub async fn write(conn: &mut ConnHandler, buf: &[u8]) -> Result<(), ConnectionClosed> {
-    conn.write(buf).await
+/// Note: Unlike TCP, NCD guarantees that this message will be sent as a single Packet,
+///       and will be received as a single message on the other end.
+pub async fn write(conn: &mut ConnHandler, message: &[u8]) -> Result<(), ConnectionClosed> {
+    conn.write(message).await
 }
 
 /// Get the connection status, including the latest rtt, connection state, etc.
@@ -84,6 +89,17 @@ mod tests {
         let rt1 = get_runtime();
         let rt2 = get_runtime();
         assert_eq!(rt1 as *const Runtime, rt2 as *const Runtime);
+    }
+
+    fn assert_close_ok(result: Result<Result<Vec<Vec<u8>>, ConnectionError>, ConnectionClosed>) {
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(ConnectionError::PeerClosed)) => {}
+            Err(ConnectionClosed::Error(ConnectionError::PeerClosed)) => {}
+            other => {
+                other.unwrap().unwrap();
+            }
+        }
     }
 
     async fn gen_conn_handlers() -> (ConnHandler, ConnHandler) {
@@ -130,7 +146,7 @@ mod tests {
         assert_eq!(msg, b"Hello from device");
         // Close connections
         let host_close = close(host).await;
-        assert!(matches!(host_close, Ok(Ok(()))));
+        assert!(matches!(host_close, Ok(Ok(_))));
         let read_res = device.read().await;
         assert!(matches!(
             read_res,
@@ -142,7 +158,7 @@ mod tests {
         // host closed first
         let (host, mut device) = gen_conn_handlers().await;
         let host_close = close(host).await;
-        assert!(matches!(host_close, Ok(Ok(()))));
+        assert!(matches!(host_close, Ok(Ok(_))));
         let read_res = device.read().await;
         assert!(matches!(
             read_res,
@@ -151,7 +167,7 @@ mod tests {
         // device close first
         let (host, mut device) = gen_conn_handlers().await;
         let host_close = close(host).await;
-        assert!(matches!(host_close, Ok(Ok(()))));
+        assert!(matches!(host_close, Ok(Ok(_))));
         let read_res = device.read().await;
         assert!(matches!(
             read_res,
@@ -169,12 +185,15 @@ mod tests {
                 let device_close = close(device).await;
                 device_close
             });
-            match (host_close.await.unwrap(), device_close.await.unwrap()) {
-                (Ok(Ok(())), Ok(Err(ConnectionError::PeerClosed))) => {}
-                (Ok(Err(ConnectionError::PeerClosed)), Ok(Ok(()))) => {}
-                (Ok(Ok(())), Err(ConnectionClosed::Normal)) => {}
-                (Err(ConnectionClosed::Normal), Ok(Ok(()))) => {}
-                (Ok(Ok(())), Ok(Ok(()))) => {}
+            let res = tokio::join!(host_close, device_close);
+            match (res.0.unwrap(), res.1.unwrap()) {
+                (Ok(Ok(_)), Ok(Err(ConnectionError::PeerClosed)))
+                | (Ok(Ok(_)), Err(ConnectionClosed::Error(ConnectionError::PeerClosed))) => {}
+                (Ok(Err(ConnectionError::PeerClosed)), Ok(Ok(_)))
+                | (Err(ConnectionClosed::Error(ConnectionError::PeerClosed)), Ok(Ok(_))) => {}
+                (Ok(Ok(_)), Err(ConnectionClosed::Normal)) => {}
+                (Err(ConnectionClosed::Normal), Ok(Ok(_))) => {}
+                (Ok(Ok(_)), Ok(Ok(_))) => {}
                 other => panic!("Unexpected close result: {other:?}"),
             }
         }
@@ -208,10 +227,7 @@ mod tests {
                 let received = read(&mut host).await.unwrap();
                 assert_eq!(received, msg);
             }
-            match close(host).await {
-                Ok(Ok(())) | Ok(Err(ConnectionError::PeerClosed)) => {}
-                other => other.unwrap().unwrap(),
-            }
+            assert_close_ok(close(host).await);
         });
         let host_msgs_dev = host_msgs.clone();
         let device_msgs_dev = device_msgs.clone();
@@ -229,10 +245,7 @@ mod tests {
                 let received = read(&mut device).await.unwrap();
                 assert_eq!(received, msg);
             }
-            match close(device).await {
-                Ok(Ok(())) | Ok(Err(ConnectionError::PeerClosed)) => {}
-                other => other.unwrap().unwrap(),
-            }
+            assert_close_ok(close(device).await);
         });
         let res = tokio::join!(host_future, dev_future);
         res.0.unwrap();
@@ -273,10 +286,7 @@ mod tests {
                 let received = read(&mut host).await.unwrap();
                 assert_eq!(received, msg);
             }
-            match close(host).await {
-                Ok(Ok(())) | Ok(Err(ConnectionError::PeerClosed)) => {}
-                other => other.unwrap().unwrap(),
-            }
+            assert_close_ok(close(host).await);
         });
         let host_msgs_dev = host_msgs.clone();
         let device_msgs_dev = device_msgs.clone();
@@ -294,10 +304,7 @@ mod tests {
             for msg in device_msgs_dev {
                 write(&mut device, &msg).await.unwrap();
             }
-            match close(device).await {
-                Ok(Ok(())) | Ok(Err(ConnectionError::PeerClosed)) => {}
-                other => other.unwrap().unwrap(),
-            }
+            assert_close_ok(close(device).await);
         });
         let res = tokio::join!(host_future, dev_future);
         res.0.unwrap();
