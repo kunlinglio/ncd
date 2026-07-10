@@ -20,7 +20,7 @@ pub async fn run() -> ! {
 
     // 1.2 create netlink socket
     let netlink_socket = NetlinkSocket::new().unwrap_or_else(|e| {
-        eprintln!("Error creating netlink socket.: {}", e);
+        eprintln!("Error creating netlink socket: {}", e);
         process::exit(1);
     });
 

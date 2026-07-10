@@ -59,7 +59,7 @@ impl Device {
         self.write_tx = Some(write_tx);
 
         let minor = self.minor;
-        tokio::spawn(tcp_actor(conn, minor, data_tx, write_rx));
+        tokio::spawn(connection_run(conn, minor, data_tx, write_rx));
 
         Ok(())
     }
@@ -84,7 +84,7 @@ impl Device {
 
 /// Actor task that owns the ConnHandler exclusively.
 /// Handles both reading from and writing to the TCP connection.
-async fn tcp_actor(
+async fn connection_run(
     mut conn: ConnHandler,
     minor: u8,
     data_tx: mpsc::UnboundedSender<(u8, Vec<u8>)>,
