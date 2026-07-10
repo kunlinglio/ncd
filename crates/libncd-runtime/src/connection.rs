@@ -89,6 +89,7 @@ impl IoState {
         Ok(())
     }
 
+    /// Try to receive ONE packet from the TCP stream.
     /// Return Ok(None) if EOF is reached, otherwise return Ok(Some(packet)) if a packet is received.
     async fn recv_packet(&mut self) -> Result<Option<Packet>, ConnectionError> {
         loop {
@@ -125,7 +126,7 @@ impl IoState {
 
             // Try to assemble packet: frame_buffer -> Packet
             loop {
-                // TODO: Optimize O(n) memory copy
+                // TODO: Optimize (maybe) O(n) memory copy
                 let contiguous = self.frame_buffer.make_contiguous();
                 let Some(res) =
                     try_assemble_packet(contiguous).map_err(ConnectionError::ProtocolError)?
