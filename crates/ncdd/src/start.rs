@@ -1,9 +1,14 @@
 use crate::config::{self};
 use crate::device::Device;
 use crate::netlink::NetlinkSocket;
-use crate::netlink::{NCD_MSG_CLOSE_REQ, NCD_MSG_DATA, NCD_MSG_OPEN_REQ};
+use crate::netlink::{
+    NCD_MSG_CLOSE_REQ, NCD_MSG_DATA, NCD_MSG_KFIFO_AVAILABLE, NCD_MSG_KFIFO_FULL, NCD_MSG_OPEN_REQ,
+};
 use std::process;
 use tokio::sync::mpsc;
+
+/// 20% of FIFO_SIZE — maximum bytes sent to kernel at once
+const SHARD_SIZE: usize = 819;
 
 pub async fn run() -> ! {
     /* 1. initialize */
@@ -32,6 +37,8 @@ pub async fn run() -> ! {
 
     // 1.4 create devices
     let mut devices = Vec::new();
+    let mut paused = Vec::new(); // kfifo back-pressure per device
+    let mut pending = Vec::new(); // queued chunks while paused
     for (minor, cfg) in device_configs.iter().enumerate() {
         if let Err(e) = netlink_socket
             .create_device(minor as u8, cfg.name.as_str())
@@ -46,12 +53,15 @@ pub async fn run() -> ! {
             cfg.remote_ip,
             cfg.remote_port,
         ));
+        paused.push(false);
+        pending.push(Vec::<Vec<u8>>::new());
     }
 
     // 1.5 create channel for actor tasks to send received TCP data back to main loop
     let (tcp_tx, mut tcp_rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
 
     /* 2. main loop */
+    println!("Daemon started");
     loop {
         tokio::select! {
             // kernel → daemon
@@ -91,17 +101,44 @@ pub async fn run() -> ! {
                         let minor = payload[0] as usize;
                         println!("Device {} closing", devices[minor].name);
                         devices[minor].close();
+                        paused[minor] = false;
+                        pending[minor].clear();
+                    }
+                    NCD_MSG_KFIFO_FULL => {
+                        let minor = payload[0] as usize;
+                        println!("Device {} kfifo full — pausing", devices[minor].name);
+                        paused[minor] = true;
+                    }
+                    NCD_MSG_KFIFO_AVAILABLE => {
+                        let minor = payload[0] as usize;
+                        println!("Device {} kfifo available — resuming, flushing {} chunks",
+                                 devices[minor].name, pending[minor].len());
+                        paused[minor] = false;
+                        for chunk in pending[minor].drain(..) {
+                            shard_and_send(&netlink_socket, minor as u8, chunk).await;
+                        }
                     }
                     _ => {}
                 }
             }
 
-            // TCP actor → main loop
+            // TCP actor → main loop  (shard then send, or buffer if paused)
             Some((minor, data)) = tcp_rx.recv() => {
-                if let Err(e) = netlink_socket.send_data_to_kernel(minor, &data).await {
-                    eprintln!("Error sending data to kernel: {}", e);
+                if paused[minor as usize] {
+                    pending[minor as usize].push(data);
+                    continue;
                 }
+                shard_and_send(&netlink_socket, minor as u8, data).await;
             }
+        }
+    }
+}
+
+/// Split data into SHARD_SIZE chunks and send each to the kernel.
+async fn shard_and_send(nl: &NetlinkSocket, minor: u8, data: Vec<u8>) {
+    for chunk in data.chunks(SHARD_SIZE) {
+        if let Err(e) = nl.send_data_to_kernel(minor, chunk).await {
+            eprintln!("Error sending data to kernel for minor {}: {}", minor, e);
         }
     }
 }

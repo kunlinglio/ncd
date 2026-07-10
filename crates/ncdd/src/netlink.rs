@@ -14,6 +14,8 @@ pub const NCD_MSG_DATA: u16 = 3; // bi-directional: data transfer
 pub const NCD_MSG_CLOSE_REQ: u16 = 4; // driver→daemon:  request to close device
 pub const NCD_MSG_CREATE_DEV: u16 = 5; // daemon→driver:  create device
 pub const NCD_MSG_DESTROY_DEV: u16 = 6; // daemon→driver:  destroy device
+pub const NCD_MSG_KFIFO_FULL: u16 = 7; // driver→daemon:  kfifo ≥ 80%, pause sending
+pub const NCD_MSG_KFIFO_AVAILABLE: u16 = 8; // driver→daemon:  kfifo < 20%, resume sending
 
 #[repr(C)]
 struct NlMsgHdr {
