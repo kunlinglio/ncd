@@ -73,7 +73,8 @@ pub fn parse() -> Option<Args> {
         }
     }
 
-    command.map(|c| Args { command: c, verbose })
+    // Default to "run" when no subcommand is given.
+    Some(Args { command: command.unwrap_or(Command::Run), verbose })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -127,7 +128,7 @@ pub fn select_devices(all: &[DeviceInfo]) -> Vec<DeviceInfo> {
 fn run_tui(all: &[DeviceInfo]) -> Vec<DeviceInfo> {
     use crossterm::{
         cursor,
-        event::{self, Event, KeyCode, KeyEventKind},
+        event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
         execute,
         style::{Print, PrintStyledContent, Stylize},
         terminal::{self, Clear, ClearType},
@@ -151,9 +152,9 @@ fn run_tui(all: &[DeviceInfo]) -> Vec<DeviceInfo> {
             io::stdout(),
             cursor::MoveTo(0, 0),
             Clear(ClearType::All),
-            Print("Select devices to expose to Linux\n".bold().underlined()),
-            Print("  ↑↓: move   Space: toggle   Enter: confirm   Esc: quit\n"),
-            Print("  Each selected device gets its own port, starting at 10000\n\n"),
+            Print("Select devices to expose to Linux\r\n".bold().underlined()),
+            Print("  ↑↓: move   Space: toggle   Enter: confirm   Esc: quit\r\n"),
+            Print("  Each selected device gets its own port, starting at 10000\r\n\r\n"),
         );
 
         for (i, d) in all.iter().enumerate() {
@@ -168,24 +169,32 @@ fn run_tui(all: &[DeviceInfo]) -> Vec<DeviceInfo> {
             } else {
                 let _ = execute!(io::stdout(), Print(line));
             }
-            let _ = execute!(io::stdout(), Print("\n"));
+            let _ = execute!(io::stdout(), Print("\r\n"));
         }
 
         let count = selected.iter().filter(|&&s| s).count();
         let footer = if count > 0 {
             format!(
-                "\n  {count} device(s) selected  →  ports {}-{}\n",
+                "\r\n  {count} device(s) selected  →  ports {}-{}\r\n",
                 BASE_PORT,
                 BASE_PORT + count.saturating_sub(1) as u16,
             )
         } else {
-            "\n  0 devices selected\n".into()
+            "\r\n  0 devices selected\r\n".into()
         };
         let _ = execute!(io::stdout(), Print(footer));
         let _ = io::stdout().flush();
 
         match event::read() {
-            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                // Ctrl+C or Ctrl+D → exit without selecting anything.
+                if (k.code == KeyCode::Char('c') || k.code == KeyCode::Char('d'))
+                    && k.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    selected.fill(false);
+                    break;
+                }
+                match k.code {
                 KeyCode::Up if cursor > 0 => cursor -= 1,
                 KeyCode::Down if cursor + 1 < all.len() => cursor += 1,
                 KeyCode::Char(' ') => selected[cursor] = !selected[cursor],
@@ -202,7 +211,8 @@ fn run_tui(all: &[DeviceInfo]) -> Vec<DeviceInfo> {
                     break;
                 }
                 _ => {}
-            },
+            }
+            }
             _ => {}
         }
     }

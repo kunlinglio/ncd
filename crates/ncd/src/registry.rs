@@ -1,13 +1,13 @@
 #[cfg(target_os = "linux")]
 use glob::glob;
-use regex::Regex;
-use serialport::available_ports;
-use std::collections::HashMap;
-use std::path::Path;
 #[cfg(target_os = "macos")]
 use objc::runtime::Object;
 #[cfg(target_os = "macos")]
 use objc::{class, msg_send, sel, sel_impl};
+use regex::Regex;
+use serialport::available_ports;
+use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -68,7 +68,8 @@ impl DevicesRegistry {
     pub fn register(&mut self, devices: &[DeviceInfo], start_port: u16) {
         self.port_to_device.clear();
         for (i, device) in devices.iter().enumerate() {
-            self.port_to_device.insert(start_port + i as u16, device.clone());
+            self.port_to_device
+                .insert(start_port + i as u16, device.clone());
         }
     }
 
@@ -106,12 +107,11 @@ impl DevicesRegistry {
             // runtime (Apple uses shortened 4-char identifiers for
             // media types).
             autoreleasepool(|| {
-                let devices: *mut Object = unsafe {
-                    msg_send![class!(AVCaptureDevice),
-                        devicesWithMediaType:
-                        msg_send![class!(NSString), stringWithUTF8String: "vide\0".as_ptr() as _]
-                    ]
+                let media_type: *mut Object = unsafe {
+                    msg_send![class!(NSString), stringWithUTF8String: "vide\0".as_ptr() as *const u8]
                 };
+                let devices: *mut Object =
+                    unsafe { msg_send![class!(AVCaptureDevice), devicesWithMediaType: media_type] };
 
                 // If the media-type query returns nil there are
                 // simply no video capture devices.  Do NOT fall
@@ -125,8 +125,7 @@ impl DevicesRegistry {
 
                 let count: usize = unsafe { msg_send![devices, count] };
                 for idx in 0..count {
-                    let device: *mut Object =
-                        unsafe { msg_send![devices, objectAtIndex: idx] };
+                    let device: *mut Object = unsafe { msg_send![devices, objectAtIndex: idx] };
                     if device.is_null() {
                         continue;
                     }
@@ -212,7 +211,9 @@ impl DevicesRegistry {
             // fragile name heuristics.
             if let Ok(entries) = glob("/dev/input/event*") {
                 for entry in entries.flatten() {
-                    let Ok(f) = std::fs::File::open(&entry) else { continue };
+                    let Ok(f) = std::fs::File::open(&entry) else {
+                        continue;
+                    };
                     use std::os::unix::io::AsRawFd;
                     let fd = f.as_raw_fd();
 
@@ -279,14 +280,17 @@ impl DevicesRegistry {
 
             unsafe {
                 let class_guid: GUID = GUID_DEVCLASS_KEYBOARD;
-                let hdev = SetupDiGetClassDevsW(Some(&class_guid), None, None, DIGCF_PRESENT).unwrap_or_default();
+                let hdev = SetupDiGetClassDevsW(Some(&class_guid), None, None, DIGCF_PRESENT)
+                    .unwrap_or_default();
                 if hdev.0 != 0 {
                     let mut index = 0u32;
                     loop {
                         let mut devinfo = SP_DEVINFO_DATA::default();
                         devinfo.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
                         let success = SetupDiEnumDeviceInfo(hdev, index, &mut devinfo).as_bool();
-                        if !success { break; }
+                        if !success {
+                            break;
+                        }
 
                         // Try friendly name first, fall back to device
                         // description; fall back to an index-based name
@@ -542,7 +546,10 @@ mod tests {
             let by_port = registry.get_devices_by_port(vec![*port]);
             assert!(by_port.iter().any(|d| d.path == device.path));
 
-            assert_eq!(registry.get_single_device_by_port(*port).unwrap().path, device.path);
+            assert_eq!(
+                registry.get_single_device_by_port(*port).unwrap().path,
+                device.path
+            );
         }
     }
 }

@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 pub mod app;
 pub mod connection;
 pub mod device;
