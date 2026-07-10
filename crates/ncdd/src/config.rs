@@ -1,4 +1,3 @@
-use dirs;
 use serde::Deserialize;
 use std::io;
 use std::net::IpAddr;
@@ -16,24 +15,13 @@ pub struct DeviceConfig {
     pub remote_port: u16,
 }
 
-/// Find the default configuration path.
-/// Returns None if no valid path is found.
-/// The order of candidates is:
-/// 1. Current directory (./ncd_config.toml)
-/// 2. Config directory (~/.config/ncd/ncd_config.toml)
-/// 3. /etc/ncd/ncd_config.toml
-pub fn default_config_path() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = vec![
-        PathBuf::from("ncd_config.toml"),
-        PathBuf::from("/etc/ncd/ncd_config.toml"),
-    ];
-    if let Some(dir) = dirs::config_dir() {
-        candidates.insert(1, dir.join("ncd/ncd_config.toml"));
-    }
-    for path in candidates {
-        if path.exists() {
-            return Some(path);
-        }
+/// Find the configuration path.
+/// Returns None if the path is not found.
+/// the path is /etc/ncd/config.toml
+pub fn get_config_path() -> Option<PathBuf> {
+    let config_path = PathBuf::from("/etc/ncd/config.toml");
+    if config_path.exists() {
+        return Some(config_path);
     }
     None
 }
