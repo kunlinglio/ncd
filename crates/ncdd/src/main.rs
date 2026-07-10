@@ -2,6 +2,14 @@ mod config;
 mod device;
 mod netlink;
 mod start;
+
+#[cfg(target_os = "linux")]
+#[tokio::main]
+async fn main() {
+    start::run().await;
+}
+
+#[cfg(not(target_os = "linux"))]
 fn main() {
-    println!("ncdd starting...");
+    compile_error!("ncdd only supports Linux");
 }

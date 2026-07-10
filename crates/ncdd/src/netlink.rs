@@ -109,6 +109,7 @@ impl NetlinkSocket {
     }
 
     /// Return the kernel-assigned PID of this socket.
+    #[allow(dead_code)]
     pub fn pid(&self) -> u32 {
         self.pid
     }
@@ -149,13 +150,15 @@ impl NetlinkSocket {
             .await
     }
 
-    /// Ask the driver to create a device node /dev/<name>.
-    pub async fn create_device(&self, name: &str) -> io::Result<()> {
-        self.send_to_kernel(NCD_MSG_CREATE_DEV, name.as_bytes())
-            .await
+    /// Ask the driver to create device /dev/<name> with the given minor.
+    pub async fn create_device(&self, minor: u8, name: &str) -> io::Result<()> {
+        let mut payload = vec![minor];
+        payload.extend_from_slice(name.as_bytes());
+        self.send_to_kernel(NCD_MSG_CREATE_DEV, &payload).await
     }
 
     /// Ask the driver to destroy a device node identified by `minor`.
+    #[allow(dead_code)]
     pub async fn destroy_device(&self, minor: u8) -> io::Result<()> {
         self.send_to_kernel(NCD_MSG_DESTROY_DEV, [minor].as_slice())
             .await
