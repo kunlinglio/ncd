@@ -1,8 +1,6 @@
 use libncd_runtime::error::{ConnectionClosed, ConnectionCreateError};
 use thiserror::Error;
 
-// ── 顶层错误 ──
-
 #[derive(Debug, Error)]
 pub enum NcdError {
     #[error(transparent)]
@@ -15,25 +13,10 @@ pub enum NcdError {
     InnerConnectionError(ConnectionClosed),
 
     #[error(transparent)]
-    RegistryError(#[from] RegistryError),
-
-    #[error(transparent)]
     DeviceError(#[from] DeviceError),
 }
 
-// ── Registry 错误 ──
-
-#[derive(Debug, Error)]
-pub enum RegistryError {
-    #[error("Device not found: {0}")]
-    DeviceNotFound(String),
-
-    #[error("Device already registered: {0}")]
-    DeviceAlreadyRegistered(String),
-}
-
-// ── Device 错误 ──
-
+/// Device-level errors.
 #[derive(Debug, Error)]
 pub enum DeviceError {
     #[error("Device is not open: {0}")]

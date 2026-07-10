@@ -42,7 +42,6 @@ impl NcdConnection {
         }
     }
 
-    /// 读取对端发来的一个完整数据包
     pub async fn read_connection(&mut self) -> Result<Vec<u8>, NcdError> {
         match read(&mut self.connection).await {
             Ok(data) => Ok(data),
@@ -50,8 +49,7 @@ impl NcdConnection {
         }
     }
 
-    /// 发送一个完整数据包给对端
-    pub async fn write_connection(&mut self, data: &[u8]) -> Result<(), NcdError> {
+    pub async fn write_connection(&mut self, data: Vec<u8>) -> Result<(), NcdError> {
         match write(&mut self.connection, data).await {
             Ok(()) => Ok(()),
             Err(e) => Err(NcdError::InnerConnectionError(e)),

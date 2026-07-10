@@ -1,5 +1,6 @@
+use std::sync::{Arc, Mutex};
 use tokio::select;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::Notify;
 
 use crate::connection::NcdConnection;
 use crate::device::NcdDeviceOperations;
@@ -7,56 +8,111 @@ use crate::error::NcdError;
 
 pub struct NcdSession {
     connection: NcdConnection,
-    device: Box<dyn NcdDeviceOperations>,
-    ready_rx: Receiver<()>,
-    /// 保持 sender 存活，设备通过 `notifier()` 获取 clone 发出就绪信号
-    _ready_tx: Sender<()>,
+    device: Arc<Mutex<Box<dyn NcdDeviceOperations>>>,
+    ready_notify: Arc<Notify>,
+    verbose: bool,
 }
 
 impl NcdSession {
-    pub fn new(connection: NcdConnection, device: Box<dyn NcdDeviceOperations>) -> Self {
-        // 使用有界 channel，避免无限内存增长；容量选择 16
-        let (tx, rx) = mpsc::channel(16);
-        NcdSession { connection, device, ready_rx: rx, _ready_tx: tx }
+    pub fn new(
+        connection: NcdConnection,
+        device: Arc<Mutex<Box<dyn NcdDeviceOperations>>>,
+        ready_notify: Arc<Notify>,
+    ) -> Self {
+        NcdSession { connection, device, ready_notify, verbose: false }
     }
 
-    /// 设备端获取通知发送端，帧/事件就绪时 send(()) 唤醒 select! 读分支。
-    pub fn notifier(&self) -> Sender<()> {
-        self._ready_tx.clone()
+    /// Enable verbose mode — every data chunk is logged with direction
+    /// and preview on stderr.
+    pub fn set_verbose(&mut self, v: bool) {
+        self.verbose = v;
     }
 
     pub async fn run(&mut self) -> Result<(), NcdError> {
-        let mut buf = [0u8; 65536];
+        let buf_size = self.device.lock().unwrap().read_buffer_size();
+        let mut buf = vec![0u8; buf_size];
 
+        // Devices default to Open — no open() call needed.
+
+        // Kick-start the notify branch so that the first read happens even for
+        // drivers that don't have a background thread yet.  Drivers with
+        // a capture thread (CameraDriver) will re-notify on every frame.
+        self.ready_notify.notify_one();
+
+        let result = self.event_loop(&mut buf).await;
+
+        // Devices are closed externally or via Drop — no close() call needed.
+        result
+    }
+
+    async fn event_loop(&mut self, buf: &mut [u8]) -> Result<(), NcdError> {
         loop {
+            let notify = self.ready_notify.notified();
             select! {
+                // ── Path A: remote → device ──────────────────────────
                 data = self.connection.read_connection() => {
                     let data = data?;
                     if !data.is_empty() {
-                        if let Err(e) = self.device.write(&data) {
+                        if self.verbose { log_data("→ host", &data); }
+                        let write_err = {
+                            self.device.lock().unwrap().write(&data).err()
+                        };
+                        if let Some(e) = write_err {
                             let msg = format!("Error: {e}\n");
-                            self.connection.write_connection(msg.as_bytes()).await?;
+                            let _ = self.connection.write_connection(msg.into_bytes()).await;
                         }
                     }
                 }
 
-                _ = self.ready_rx.recv() => {
-                    // 一旦设备发信号，尽可能把设备产生的数据全部读出并转发到 connection
-                    loop {
-                        match self.device.read(&mut buf) {
-                            Ok(n) if n > 0 => {
-                                self.connection.write_connection(&buf[..n]).await?;
-                            }
-                            Ok(_) => break, // 没有更多数据
-                            Err(e) => {
-                                let msg = format!("Error: {e}\n");
-                                self.connection.write_connection(msg.as_bytes()).await?;
-                                break;
-                            }
+                // ── Path B: device → remote ──────────────────────────
+                _ = notify => {
+                    let read_res = {
+                        self.device.lock().unwrap().read(buf)
+                    };
+                    match read_res {
+                        Ok(n) if n > 0 => {
+                            let chunk = buf[..n].to_vec();
+                            if self.verbose { log_data("host →", &chunk); }
+                            self.connection.write_connection(chunk).await?;
+                            self.ready_notify.notify_one();
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("Error: {e}\n");
+                            let _ = self.connection.write_connection(msg.into_bytes()).await;
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/// Print a data chunk with direction and a content preview.
+fn log_data(dir: &str, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    // Short printable text → show inline.
+    if data.len() <= 200
+        && data.iter().all(|&b| b.is_ascii_graphic() || b == b'\n' || b == b'\r' || b == b'\t' || b == b' ')
+    {
+        let text = String::from_utf8_lossy(data)
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
+        eprintln!("  {dir}  {text}");
+    } else {
+        let preview = data.len().min(32);
+        let hex: String = data[..preview]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if data.len() > preview {
+            eprintln!("  {dir}  {len} B  {hex} …", len = data.len());
+        } else {
+            eprintln!("  {dir}  {len} B  {hex}", len = data.len());
         }
     }
 }
