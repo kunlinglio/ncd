@@ -39,8 +39,9 @@ def main():
     # 3. Read until newline (or timeout after 100 iterations)
     print("[*] Reading until newline...")
     buf = b""
-    for _ in range(100):
+    for _ in range(10):
         chunk = os.read(fd, 4096)
+        print(chunk)
         buf += chunk
         if b"\n" in buf:
             break

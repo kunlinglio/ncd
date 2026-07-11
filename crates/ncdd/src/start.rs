@@ -8,11 +8,10 @@ use std::collections::VecDeque;
 use std::process;
 use tokio::sync::mpsc;
 
-/// 20% of FIFO_SIZE — maximum bytes sent to kernel at once
 const FIFO_SIZE: usize = 4096;
 const FIFO_HIGH_WATERMARK: usize = FIFO_SIZE * 80 / 100;
 const FIFO_LOW_WATERMARK: usize = FIFO_SIZE * 20 / 100;
-const SHARD_SIZE: usize = FIFO_LOW_WATERMARK;
+const SHARD_SIZE: usize = FIFO_LOW_WATERMARK; // Maximum size of a single chunk sent to the kernel.
 
 pub async fn run() -> ! {
     /* 1. initialize */
@@ -41,10 +40,10 @@ pub async fn run() -> ! {
 
     // 1.4 create devices
     let mut devices = Vec::new();
-    let mut paused = Vec::new(); // kfifo back-pressure per device
+    let mut paused = Vec::new(); // whether the kernel has requested this device to pause sending
     let mut inflight = Vec::new(); // bytes sent since the last low-watermark notification
     let mut read_paused = Vec::new(); // whether the TCP actor is currently paused
-    let mut pending = Vec::new(); // queued chunks while paused
+    let mut pending = Vec::new(); // queue of chunks waiting to be sent to the kernel
     for (minor, cfg) in device_configs.iter().enumerate() {
         if let Err(e) = netlink_socket
             .create_device(minor as u8, cfg.name.as_str())
@@ -183,11 +182,11 @@ fn queue_shards(queue: &mut VecDeque<Vec<u8>>, data: Vec<u8>) {
     }
 }
 
-/// Flush pending chunks to the kernel.
-/// If the kernel is paused, stop flushing.
-/// If the inflight chunk size exceeds the high watermark, stop flushing.
-/// Otherwise, send the next chunk.
-/// If the send operation fails, push the chunk back to the front of the queue.
+/// Flush queued chunks to the kernel.
+/// Stop if:
+/// - kernel back-pressure is active;
+/// - sending the next chunk would exceed the high watermark.
+/// If sending fails, the chunk is pushed back to the front of the queue.
 async fn flush_device(
     nl: &NetlinkSocket,
     minor: usize,
@@ -214,9 +213,10 @@ async fn flush_device(
     }
 }
 
-/// Synchronize device reading state with kernel back-pressure.
-/// If the kernel is paused or the pending queue is not empty, pause the device.
-/// Otherwise, resume the device.
+/// Synchronize TCP reading with kernel back-pressure.
+/// Pause TCP reading while the kernel is back-pressured or
+/// while queued chunks are still waiting to be flushed.
+/// Resume reading once both conditions clear.
 fn sync_device_reading(
     device: &Device,
     read_paused: &mut bool,
