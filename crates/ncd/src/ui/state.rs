@@ -3,51 +3,7 @@ use std::collections::HashMap;
 use crossterm::event::KeyCode;
 
 use crate::config::{DeviceEntry, HostConfig};
-
-// ── Driver metadata ────────────────────────────────────────────
-
-pub struct DriverInfo {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub default_port: u16,
-    pub fields: &'static [DriverField],
-}
-
-pub struct DriverField {
-    pub key: &'static str,
-    pub label: &'static str,
-    pub default_value: &'static str,
-}
-
-pub fn builtin_drivers() -> Vec<DriverInfo> {
-    vec![
-        DriverInfo {
-            name: "serial",
-            description: "Serial port (RS-232/USB via pyserial)",
-            default_port: 8080,
-            fields: &[
-                DriverField {
-                    key: "device",
-                    label: "Device Path",
-                    default_value: "/dev/ttyUSB0",
-                },
-                DriverField {
-                    key: "baud",
-                    label: "Baud Rate",
-                    default_value: "115200",
-                },
-            ],
-        },
-        DriverInfo {
-            name: "keyboard",
-            description: "Terminal keyboard (raw /dev/tty, no permissions)",
-            default_port: 8081,
-            fields: &[],
-        },
-    ]
-}
-
-// ── TUI state ──────────────────────────────────────────────────
+use crate::driver_loader::registry::{DriverInfo, get_drivers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -59,7 +15,7 @@ pub enum Mode {
 }
 
 pub struct DriverRow {
-    pub info: DriverInfo,
+    pub info: &'static DriverInfo,
     pub enabled: bool,
     pub port_str: String,
     pub field_values: Vec<String>,
@@ -75,18 +31,15 @@ pub struct TuiState {
 
 impl TuiState {
     pub fn new() -> Self {
-        let drivers = builtin_drivers();
+        let drivers = get_drivers();
         let rows: Vec<DriverRow> = drivers
-            .into_iter()
+            .drivers
+            .iter()
             .enumerate()
             .map(|(i, info)| {
                 let port = info.default_port + i as u16;
                 DriverRow {
-                    field_values: info
-                        .fields
-                        .iter()
-                        .map(|f| f.default_value.to_string())
-                        .collect(),
+                    field_values: info.options.iter().map(|f| f.1.to_string()).collect(),
                     port_str: port.to_string(),
                     enabled: false,
                     info,
@@ -112,7 +65,7 @@ impl TuiState {
     }
 
     fn field_count(&self) -> usize {
-        1 + self.selected_row().info.fields.len()
+        1 + self.selected_row().info.options.len()
     }
 
     fn get_field_value_mut(&mut self, idx: usize) -> &mut String {
@@ -133,10 +86,10 @@ impl TuiState {
                 let port: u16 = r.port_str.parse().unwrap_or(r.info.default_port);
                 let options: HashMap<String, String> = r
                     .info
-                    .fields
+                    .options
                     .iter()
                     .enumerate()
-                    .map(|(i, f)| (f.key.to_string(), r.field_values[i].clone()))
+                    .map(|(i, f)| (f.0.to_string(), r.field_values[i].clone()))
                     .collect();
                 DeviceEntry {
                     driver: r.info.name.to_string(),
