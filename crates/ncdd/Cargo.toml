@@ -9,3 +9,9 @@ tokio = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 libc = "0.2.186"
+tar = "0.4"
+tempfile = "3"
+
+[build-dependencies]
+tar = "0.4"
+walkdir = "2"

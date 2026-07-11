@@ -504,10 +504,8 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
     struct ncd_device *dev = filp->private_data;
     unsigned int copied;
     unsigned int used;
-    unsigned int refilled;
     unsigned long flags;
     bool should_resume = false;
-    bool wake_reader = false;
     int ret;
 
     if(!dev) {
@@ -529,24 +527,33 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
         }
     }
 
-    ret = kfifo_to_user(&dev->data_fifo, buf, count, &copied);
-    refilled = ncd_drain_pending_locked(dev);
-    used = kfifo_len(&dev->data_fifo);
-    if(refilled > 0) wake_reader = true;
+    /* copy from kfifo to kernel buffer under lock, then to user outside */
+    {
+        size_t want = min(count, (size_t)FIFO_SIZE);
+        unsigned char *kbuf = kmalloc(want, GFP_ATOMIC);
+        if(!kbuf) {
+            spin_unlock_irqrestore(&dev->fifo_lock, flags);
+            return -ENOMEM;
+        }
+        copied = kfifo_out(&dev->data_fifo, kbuf, want);
+        ncd_drain_pending_locked(dev);
+        used = kfifo_len(&dev->data_fifo);
 
-    /* resume daemon when pending backlog is empty and kfifo drops below 20% */
-    if(dev->kfifo_paused && list_empty(&dev->pending_chunks) && used < FIFO_LOW_WATERMARK) {
-        dev->kfifo_paused = false;
-        should_resume = true;
+        /* resume daemon when pending backlog is empty and kfifo drops below 20% */
+        if(dev->kfifo_paused && list_empty(&dev->pending_chunks) && used < FIFO_LOW_WATERMARK) {
+            dev->kfifo_paused = false;
+            should_resume = true;
+        }
+        spin_unlock_irqrestore(&dev->fifo_lock, flags);
+
+        if(copied > 0) {
+            if(copy_to_user(buf, kbuf, copied)) {
+                kfree(kbuf);
+                return -EFAULT;
+            }
+        }
+        kfree(kbuf);
     }
-    spin_unlock_irqrestore(&dev->fifo_lock, flags);
-
-    if(ret) {
-        pr_err("ncd: kfifo_to_user failed, ret=%d\n", ret);
-        return -EFAULT;
-    }
-
-    if(wake_reader) wake_up_interruptible(&dev->read_wait_queue);
 
     if(should_resume) {
         char resume[1] = { dev->minor };

@@ -1,11 +1,15 @@
 mod config;
 mod device;
+mod driver;
 mod netlink;
 mod start;
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
+    if !driver::ensure_module_loaded() {
+        std::process::exit(1);
+    }
     start::run().await;
 }
 
