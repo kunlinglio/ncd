@@ -12,7 +12,6 @@ class Device:
     identifier: str  # Identifier must be unique for each device, this will not be used for display
     name: str  # Display name for the device, can be non-unique
     description: str  # Description for the device, can be empty
-    options: dict[str, str]  # Option name -> Option default value
 
 
 class Adapter(ABC):
@@ -32,7 +31,7 @@ class Adapter(ABC):
         pass
 
     @abstractmethod
-    def open(self, identifier: str, options: dict[str, str]):
+    def open(self, options: dict[str, str]):
         """Open the device with the given options."""
         pass
 
@@ -114,7 +113,7 @@ class Adapter(ABC):
     def __enter__(
         self,
     ) -> "Adapter":
-        self.open(self.device_identifier, self.options)
+        self.open(self.options)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
