@@ -18,10 +18,8 @@ import sys
 def main():
     try:
         while True:
-            data = sys.stdin.buffer.read(4096)
-            if not data:
-                break
-            sys.stdout.buffer.write(data)
+            data = "*" * 100  # for debug
+            sys.stdout.write(data)
             sys.stdout.buffer.flush()
     except KeyboardInterrupt:
         pass
