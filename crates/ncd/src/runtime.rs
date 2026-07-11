@@ -1,10 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use libncd_runtime::{self, ConnHandler, OpenParams, error::ConnectionClosed};
-use tempfile::TempDir;
 
 use crate::config::HostConfig;
-use crate::driver::{DriverError, DriverProcess};
+use crate::driver_loader::driver::{Driver, DriverError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -14,8 +13,6 @@ pub enum RuntimeError {
     Driver(#[from] DriverError),
     #[error("NCD connection error: {0}")]
     Ncd(#[from] libncd_runtime::error::ConnectionCreateError),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Run the NCD host with loaded configuration.
@@ -24,14 +21,10 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
         return Err(RuntimeError::NoDevices);
     }
 
-    // Create temp directory for extracted .py files.
-    // Must be held alive until all drivers are spawned.
-    let temp_dir = TempDir::new()?;
-
     // Spawn all device actors
     let mut tasks = tokio::task::JoinSet::new();
     for entry in &config.device {
-        let driver = DriverProcess::spawn(&entry.driver, &entry.options, temp_dir.path()).await?;
+        let driver = Driver::spawn(&entry.driver, &entry.options).await?;
 
         let conn = libncd_runtime::open(OpenParams::Host {
             listen_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -66,13 +59,10 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
         _ = all_done => {}
     }
 
-    // temp_dir is dropped here, cleaning up extracted .py files
     Ok(())
 }
 
-/// Per-device actor task. Bidirectional raw byte forwarding between
-/// the NCD connection and the Python driver process.
-async fn device_actor(mut conn: ConnHandler, mut driver: DriverProcess, name: String) {
+async fn device_actor(mut conn: ConnHandler, mut driver: Driver, name: String) {
     loop {
         // Check if the driver process has exited
         if let Some(status) = driver.try_exit_status() {
@@ -85,7 +75,7 @@ async fn device_actor(mut conn: ConnHandler, mut driver: DriverProcess, name: St
         }
 
         tokio::select! {
-            // NCD connection → Python driver stdin
+            // NCD connection -> Python driver stdin
             result = libncd_runtime::read(&mut conn) => {
                 match result {
                     Ok(data) => {
@@ -108,7 +98,7 @@ async fn device_actor(mut conn: ConnHandler, mut driver: DriverProcess, name: St
                     }
                 }
             }
-            // Python driver stdout → NCD connection
+            // Python driver stdout -> NCD connection
             data = driver.recv() => {
                 match data {
                     Some(bytes) => {

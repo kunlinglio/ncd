@@ -5,7 +5,6 @@ description = "NCD host-side device drivers"
 requires-python = ">=3.10"
 dependencies = [
     "pyserial>=3.5",
-    "pynput>=1.7",
 ]
 
 [tool.hatch.build.targets.wheel]
