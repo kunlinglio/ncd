@@ -35,7 +35,7 @@ pub struct TuiState {
 impl TuiState {
     pub fn new() -> Self {
         let devices = get_all_devices();
-        let rows: Vec<DeviceRow> = devices
+        let mut rows: Vec<DeviceRow> = devices
             .into_iter()
             .map(|info| {
                 let option_keys: Vec<String> = info.options.keys().cloned().collect();
@@ -50,6 +50,29 @@ impl TuiState {
                 }
             })
             .collect();
+
+        // Merge existing saved config if present.
+        if let Some(cfg) = HostConfig::load() {
+            for entry in &cfg.device {
+                if let Some(row) = rows.iter_mut().find(|r| {
+                    r.info.adapter_name == entry.driver
+                        && r.info.identifier == entry.device_identifier
+                }) {
+                    row.enabled = true;
+                    row.port_str = entry.port.to_string();
+                    // Merge saved option values into the row's fields.
+                    for (opt_key, opt_val) in &entry.options {
+                        if let Some(pos) = row.option_keys.iter().position(|k| k == opt_key) {
+                            row.field_values[pos] = opt_val.clone();
+                        } else {
+                            // Option from config not in default list — add it.
+                            row.option_keys.push(opt_key.clone());
+                            row.field_values.push(opt_val.clone());
+                        }
+                    }
+                }
+            }
+        }
 
         Self {
             rows,
