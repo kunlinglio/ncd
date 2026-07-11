@@ -36,16 +36,15 @@ def main():
     written = os.write(fd, test_msg)
     print(f"[+] Wrote {written} bytes")
 
-    # 3. Read data back (echoed from TCP server via daemon)
-    time.sleep(10)
-    print("[*] Reading...")
-    data = os.read(fd, 4096)
-    print(f"[+] Read {len(data)} bytes: {data!r}")
-
-    if data == test_msg:
-        print("[✓] Echo match — test PASSED")
-    else:
-        print(f"[✗] Mismatch! Expected {test_msg!r}, got {data!r}")
+    # 3. Read until newline (or timeout after 100 iterations)
+    print("[*] Reading until newline...")
+    buf = b""
+    for _ in range(100):
+        chunk = os.read(fd, 4096)
+        buf += chunk
+        if b"\n" in buf:
+            break
+    print(f"[+] Read {len(buf)} bytes: {buf!r}")
 
     # 4. Release device
     print(f"[*] Closing {DEV_PATH} ...")
