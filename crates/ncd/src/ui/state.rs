@@ -2,27 +2,30 @@ use std::collections::HashMap;
 
 use crossterm::event::KeyCode;
 
+use crate::adapter_loader::list::{get_all_devices, DeviceInfo};
 use crate::config::{DeviceEntry, HostConfig};
-use crate::driver_loader::registry::{DriverInfo, get_drivers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Navigating the driver list.
+    /// Navigating the device list.
     Normal,
-    /// Editing a specific field of the selected driver.
-    /// Field index: 0 = port, 1+ = driver config fields.
+    /// Editing a specific field of the selected device.
+    /// Field index: 0 = port, 1+ = device option fields.
     Editing(usize),
 }
 
-pub struct DriverRow {
-    pub info: &'static DriverInfo,
+pub struct DeviceRow {
+    pub info: DeviceInfo,
     pub enabled: bool,
     pub port_str: String,
+    /// Editable values for each option, in the same order as option_keys.
     pub field_values: Vec<String>,
+    /// Option keys corresponding to each field value (for config reconstruction).
+    pub option_keys: Vec<String>,
 }
 
 pub struct TuiState {
-    pub rows: Vec<DriverRow>,
+    pub rows: Vec<DeviceRow>,
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
@@ -31,18 +34,19 @@ pub struct TuiState {
 
 impl TuiState {
     pub fn new() -> Self {
-        let drivers = get_drivers();
-        let rows: Vec<DriverRow> = drivers
-            .drivers
-            .iter()
-            .enumerate()
-            .map(|(i, info)| {
-                let port = info.default_port + i as u16;
-                DriverRow {
-                    field_values: info.options.iter().map(|f| f.1.to_string()).collect(),
-                    port_str: port.to_string(),
-                    enabled: false,
+        let devices = get_all_devices();
+        let rows: Vec<DeviceRow> = devices
+            .into_iter()
+            .map(|info| {
+                let option_keys: Vec<String> = info.options.keys().cloned().collect();
+                let field_values: Vec<String> = info.options.values().cloned().collect();
+                let port_str = info.default_port.to_string();
+                DeviceRow {
                     info,
+                    field_values,
+                    option_keys,
+                    port_str,
+                    enabled: false,
                 }
             })
             .collect();
@@ -56,16 +60,20 @@ impl TuiState {
         }
     }
 
-    pub fn selected_row(&self) -> &DriverRow {
+    pub fn selected_row(&self) -> &DeviceRow {
         &self.rows[self.selected]
     }
 
-    fn selected_row_mut(&mut self) -> &mut DriverRow {
+    fn selected_row_mut(&mut self) -> &mut DeviceRow {
         &mut self.rows[self.selected]
     }
 
+    /// Total number of editable fields for the selected row (port + options).
     fn field_count(&self) -> usize {
-        1 + self.selected_row().info.options.len()
+        if self.rows.is_empty() {
+            return 0;
+        }
+        1 + self.selected_row().option_keys.len()
     }
 
     fn get_field_value_mut(&mut self, idx: usize) -> &mut String {
@@ -77,6 +85,32 @@ impl TuiState {
         }
     }
 
+    /// Get the display label for a field index.
+    pub fn field_label(&self, idx: usize) -> &str {
+        if idx == 0 {
+            "Port"
+        } else {
+            self.selected_row()
+                .option_keys
+                .get(idx - 1)
+                .map(|s| s.as_str())
+                .unwrap_or("Unknown")
+        }
+    }
+
+    /// Get the display value for a field index.
+    pub fn field_value(&self, idx: usize) -> &str {
+        if idx == 0 {
+            &self.selected_row().port_str
+        } else {
+            self.selected_row()
+                .field_values
+                .get(idx - 1)
+                .map(|s| s.as_str())
+                .unwrap_or("")
+        }
+    }
+
     pub fn build_config(&self) -> HostConfig {
         let devices: Vec<DeviceEntry> = self
             .rows
@@ -85,14 +119,15 @@ impl TuiState {
             .map(|r| {
                 let port: u16 = r.port_str.parse().unwrap_or(r.info.default_port);
                 let options: HashMap<String, String> = r
-                    .info
-                    .options
+                    .option_keys
                     .iter()
-                    .enumerate()
-                    .map(|(i, f)| (f.0.to_string(), r.field_values[i].clone()))
+                    .zip(r.field_values.iter())
+                    .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 DeviceEntry {
-                    driver: r.info.name.to_string(),
+                    driver: r.info.adapter_name.clone(),
+                    device_identifier: r.info.identifier.clone(),
+                    device_name: r.info.name.clone(),
                     port,
                     options,
                 }
@@ -122,16 +157,18 @@ impl TuiState {
                 }
             }
             KeyCode::Char(' ') => {
-                let row = self.selected_row_mut();
-                row.enabled = !row.enabled;
+                if !self.rows.is_empty() {
+                    let row = self.selected_row_mut();
+                    row.enabled = !row.enabled;
+                }
             }
             KeyCode::Enter => {
-                if self.selected_row().enabled {
+                if !self.rows.is_empty() && self.selected_row().enabled {
                     self.mode = Mode::Editing(0);
                 }
             }
             KeyCode::Tab => {
-                if self.selected_row().enabled {
+                if !self.rows.is_empty() && self.selected_row().enabled {
                     self.mode = Mode::Editing(0);
                 }
             }
@@ -193,8 +230,4 @@ impl TuiState {
         }
     }
 
-    /// Is a specific field of the selected row being edited?
-    pub fn is_editing_field(&self, idx: usize) -> bool {
-        self.editing_field() == Some(idx)
-    }
 }

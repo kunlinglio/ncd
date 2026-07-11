@@ -7,3 +7,6 @@ build/
 # Compilation database
 compile_commands.json
 .cache/
+
+__pycache__/
+*.pyc
