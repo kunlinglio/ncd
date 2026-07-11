@@ -1,7 +1,7 @@
 mod config;
-mod driver;
+mod driver_loader;
 mod runtime;
-mod tui;
+mod ui;
 
 use clap::{Parser, Subcommand};
 
@@ -19,6 +19,8 @@ struct Cli {
 enum Commands {
     /// Launch the interactive configuration TUI.
     Config,
+    /// Delete the saved configuration file.
+    Clean,
 }
 
 #[tokio::main]
@@ -26,7 +28,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Config) => match tui::run_tui() {
+        Some(Commands::Config) => match ui::run_tui() {
             Some(cfg) => {
                 if let Err(e) = cfg.save() {
                     eprintln!("Failed to save configuration: {e}");
@@ -43,6 +45,18 @@ async fn main() {
                 println!("Configuration cancelled.");
             }
         },
+        Some(Commands::Clean) => {
+            let path = config::config_path();
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("Failed to delete configuration: {e}");
+                    std::process::exit(1);
+                }
+                println!("Configuration deleted from {}", path.display());
+            } else {
+                println!("No configuration file found at {}", path.display());
+            }
+        }
         None => {
             let cfg = config::HostConfig::load().unwrap_or_else(|| {
                 let path = config::config_path();
