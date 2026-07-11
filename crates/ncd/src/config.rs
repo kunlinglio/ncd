@@ -2,10 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Top-level configuration stored in ~/.ncd-host.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostConfig {
-    /// List of configured device entries.
     #[serde(default)]
     pub device: Vec<DeviceEntry>,
 }
@@ -24,16 +22,12 @@ pub struct DeviceEntry {
 }
 
 impl HostConfig {
-    /// Load configuration from config path.
-    /// Returns None if the file does not exist or cannot be parsed.
     pub fn load() -> Option<Self> {
         let path = config_path();
         let content = std::fs::read_to_string(&path).ok()?;
         toml::from_str(&content).ok()
     }
 
-    /// Save configuration to ~/.ncd-host.toml.
-    /// Creates parent directories if needed.
     pub fn save(&self) -> std::io::Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
