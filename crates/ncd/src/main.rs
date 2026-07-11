@@ -1,5 +1,5 @@
+mod adapter_loader;
 mod config;
-mod driver_loader;
 mod runtime;
 mod ui;
 

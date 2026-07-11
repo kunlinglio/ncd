@@ -2,15 +2,15 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use libncd_runtime::{self, ConnHandler, OpenParams, error::ConnectionClosed};
 
+use crate::adapter_loader::adapter::{Adapter, AdapterError};
 use crate::config::HostConfig;
-use crate::driver_loader::driver::{Driver, DriverError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("No devices configured")]
     NoDevices,
-    #[error("Driver error: {0}")]
-    Driver(#[from] DriverError),
+    #[error("Adapter error: {0}")]
+    Adapter(#[from] AdapterError),
     #[error("NCD connection error: {0}")]
     Ncd(#[from] libncd_runtime::error::ConnectionCreateError),
 }
@@ -24,7 +24,13 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
     // Spawn all device actors
     let mut tasks = tokio::task::JoinSet::new();
     for entry in &config.device {
-        let driver = Driver::spawn(&entry.driver, &entry.options).await?;
+        let adapter = Adapter::spawn(
+            &entry.driver,
+            &entry.device_identifier,
+            &entry.device_name,
+            &entry.options,
+        )
+        .await?;
 
         let conn = libncd_runtime::open(OpenParams::Host {
             listen_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -35,10 +41,10 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
         let name = format!("{}:{}", entry.driver, entry.port);
         eprintln!("[{name}] Listening on port {}...", entry.port);
 
-        tasks.spawn(device_actor(conn, driver, name));
+        tasks.spawn(device_actor(conn, adapter, name));
     }
 
-    // Wait for all actors to complete, or Ctrl+C to shut down
+    // Wait for all actors to complete, or Ctrl+C to shutdown
     let all_done = async {
         while let Some(result) = tasks.join_next().await {
             match result {
@@ -62,25 +68,25 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-async fn device_actor(mut conn: ConnHandler, mut driver: Driver, name: String) {
+async fn device_actor(mut conn: ConnHandler, mut adapter: Adapter, name: String) {
     loop {
-        // Check if the driver process has exited
-        if let Some(status) = driver.try_exit_status() {
+        // Check if the adapter process has exited
+        if let Some(status) = adapter.try_exit_status() {
             if !status.success() {
-                eprintln!("[{name}] Driver exited with {status}");
+                eprintln!("[{name}] Adapter exited with {status}");
             } else {
-                eprintln!("[{name}] Driver exited normally");
+                eprintln!("[{name}] Adapter exited normally");
             }
             break;
         }
 
         tokio::select! {
-            // NCD connection -> Python driver stdin
+            // NCD connection -> Python adapter stdin
             result = libncd_runtime::read(&mut conn) => {
                 match result {
                     Ok(data) => {
-                        if let Err(e) = driver.write(&data).await {
-                            eprintln!("[{name}] Write to driver failed: {e}");
+                        if let Err(e) = adapter.write(&data).await {
+                            eprintln!("[{name}] Write to adapter failed: {e}");
                             break;
                         }
                     }
@@ -98,8 +104,8 @@ async fn device_actor(mut conn: ConnHandler, mut driver: Driver, name: String) {
                     }
                 }
             }
-            // Python driver stdout -> NCD connection
-            data = driver.recv() => {
+            // Python adapter stdout -> NCD connection
+            data = adapter.recv() => {
                 match data {
                     Some(bytes) => {
                         if let Err(e) = libncd_runtime::write(&mut conn, bytes).await {
@@ -108,8 +114,8 @@ async fn device_actor(mut conn: ConnHandler, mut driver: Driver, name: String) {
                         }
                     }
                     None => {
-                        // Driver stdout closed — process exited
-                        eprintln!("[{name}] Driver stdout closed");
+                        // Adapters stdout closed — process exited
+                        eprintln!("[{name}] Adapter stdout closed");
                         break;
                     }
                 }
@@ -118,7 +124,7 @@ async fn device_actor(mut conn: ConnHandler, mut driver: Driver, name: String) {
     }
 
     // Cleanup
-    let _ = driver.kill().await;
+    let _ = adapter.kill().await;
     match libncd_runtime::close(conn).await {
         Ok(Ok(remaining)) => {
             if !remaining.is_empty() {

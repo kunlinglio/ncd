@@ -13,6 +13,11 @@ pub struct HostConfig {
 pub struct DeviceEntry {
     /// Driver name (e.g. "serial"). Must match a built-in driver.
     pub driver: String,
+    /// Unique device identifier passed to the adapter.
+    pub device_identifier: String,
+    /// Human-readable device name.
+    #[serde(default)]
+    pub device_name: String,
     /// TCP port on which this host listens for incoming NCD device connections.
     pub port: u16,
     /// Driver-specific configuration key-value pairs (e.g. device_path, baud_rate).

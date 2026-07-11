@@ -1,0 +1,6 @@
+[[adapters]]
+name = "dummy"
+path = "dummy.py"
+default_port = 10000
+description = "Dummy adapter for testing"
+options = { interval_ms = "100" }
