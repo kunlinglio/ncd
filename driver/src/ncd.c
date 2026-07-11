@@ -12,6 +12,7 @@
 #include <net/sock.h>
 #include <linux/init.h>
 #include <linux/kfifo.h>
+#include <linux/list.h>
 #include <linux/spinlock.h>
 
 #define DEVICE_NAME "ncd"          // device major name, not a specific device node name
@@ -39,12 +40,20 @@
 
 /* Kfifo buffer size */
 #define FIFO_SIZE 4096
+#define FIFO_HIGH_WATERMARK (FIFO_SIZE * 80 / 100)
+#define FIFO_LOW_WATERMARK  (FIFO_SIZE * 20 / 100)
+#define FIFO_PENDING_LIMIT  (FIFO_SIZE * 256)
 
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Network Character Device Driver");
 MODULE_AUTHOR("zhegebi");
 
+struct ncd_pending_chunk {
+    struct list_head list;
+    unsigned int len;
+    unsigned char data[];
+};
 
 struct ncd_device {
     struct cdev cdev;
@@ -56,6 +65,8 @@ struct ncd_device {
 
     struct kfifo data_fifo;                 // data buffer for received data from daemon
     spinlock_t fifo_lock;                   // protects data_fifo (kfifo_reset vs kfifo_in)
+    struct list_head pending_chunks;        // full chunks waiting for kfifo space
+    unsigned int pending_bytes;             // bytes currently held in pending_chunks
 
     int conn_status;                        // Connection status: 0 waiting, 1 success, -1 failed
 
@@ -115,6 +126,85 @@ static int send_to_daemon(const char *msg, int len, int type)
     return ret;
 }
 
+/**
+ * ncd_free_pending_locked - free pending chunks
+ */
+static void ncd_free_pending_locked(struct ncd_device *dev)
+{
+    struct ncd_pending_chunk *chunk, *tmp;
+
+    list_for_each_entry_safe(chunk, tmp, &dev->pending_chunks, list) {
+        list_del(&chunk->list);
+        kfree(chunk);
+    }
+    dev->pending_bytes = 0;
+}
+
+/**
+ * ncd_queue_pending_locked - queue pending chunk
+ * @dev: device pointer
+ * @data: data payload
+ * @len: payload length
+ * return true on success, false on failure
+ */
+static bool ncd_queue_pending_locked(struct ncd_device *dev, const char *data, unsigned int len)
+{
+    struct ncd_pending_chunk *chunk;
+
+    if(len == 0) return true;
+    if(len > FIFO_SIZE) return false;
+    if(dev->pending_bytes > FIFO_PENDING_LIMIT - len) return false;
+
+    chunk = kmalloc(sizeof(*chunk) + len, GFP_ATOMIC);
+    if(!chunk) return false;
+
+    chunk->len = len;
+    memcpy(chunk->data, data, len);
+    list_add_tail(&chunk->list, &dev->pending_chunks);
+    dev->pending_bytes += len;
+    return true;
+}
+
+/**
+ * ncd_drain_pending_locked - drain pending chunks to kfifo
+ * return total bytes copied to kfifo
+ */
+static unsigned int ncd_drain_pending_locked(struct ncd_device *dev)
+{
+    unsigned int total = 0;
+
+    while(!list_empty(&dev->pending_chunks)) {
+        struct ncd_pending_chunk *chunk;
+        unsigned int copied;
+
+        chunk = list_first_entry(&dev->pending_chunks, struct ncd_pending_chunk, list);
+        if(kfifo_avail(&dev->data_fifo) < chunk->len) break;
+
+        copied = kfifo_in(&dev->data_fifo, chunk->data, chunk->len);
+
+        list_del(&chunk->list);
+        dev->pending_bytes -= chunk->len;
+        total += copied;
+        kfree(chunk);
+    }
+
+    return total;
+}
+
+/**
+ * ncd_clear_buffers - clear kfifo and pending chunks
+ */
+static void ncd_clear_buffers(struct ncd_device *dev)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&dev->fifo_lock, flags);
+    kfifo_reset(&dev->data_fifo);
+    ncd_free_pending_locked(dev);
+    dev->kfifo_paused = false;
+    spin_unlock_irqrestore(&dev->fifo_lock, flags);
+}
+
 
 /**
  * recv_from_daemon - receive Netlink message 
@@ -136,6 +226,7 @@ static void recv_from_daemon(struct sk_buff *skb)
                 for (int i = 0; i < NCD_MAX_DEVICES; i++) {
                     if (ncd_devices[i] && ncd_devices[i]->in_use) {
                         device_destroy(ncd_class, ncd_devices[i]->dev_num);
+                        ncd_clear_buffers(ncd_devices[i]);
                         kfifo_free(&ncd_devices[i]->data_fifo);
                         cdev_del(&ncd_devices[i]->cdev);
                         ncd_devices[i]->in_use = false;
@@ -187,26 +278,59 @@ static void recv_from_daemon(struct sk_buff *skb)
                     break;
                 }
 
-                spin_lock(&ncd_devices[minor]->fifo_lock);
-                unsigned int copied = kfifo_in(&ncd_devices[minor]->data_fifo, data + 1, len - 1);
-                unsigned int used = kfifo_len(&ncd_devices[minor]->data_fifo);
-                spin_unlock(&ncd_devices[minor]->fifo_lock);
+                {
+                    struct ncd_device *dev = ncd_devices[minor];
+                    unsigned int payload_len = len - 1;
+                    unsigned int used = 0;
+                    bool wake_reader = false;
+                    bool should_pause = false;
+                    bool queued = false;
+                    bool dropped = false;
 
-                if(copied > 0) {
-                    /* wake up read wait queue */
-                    wake_up_interruptible(&ncd_devices[minor]->read_wait_queue);
+                    if(payload_len == 0) break;
 
-                    /* backpressure: pause daemon when kfifo ≥ 80% full */
-                    if (used >= FIFO_SIZE * 80 / 100 && !ncd_devices[minor]->kfifo_paused) {
-                        ncd_devices[minor]->kfifo_paused = true;
+                    spin_lock(&dev->fifo_lock);
+                    if(!list_empty(&dev->pending_chunks) ||
+                       kfifo_avail(&dev->data_fifo) < payload_len) {
+                        queued = ncd_queue_pending_locked(dev, data + 1, payload_len);
+                        if(!queued) dropped = true;
+
+                        if(!dev->kfifo_paused) {
+                            dev->kfifo_paused = true;
+                            should_pause = true;
+                        }
+                        used = kfifo_len(&dev->data_fifo);
+                    } else {
+                        unsigned int copied;
+
+                        copied = kfifo_in(&dev->data_fifo, data + 1, payload_len);
+                        used = kfifo_len(&dev->data_fifo);
+                        wake_reader = copied > 0;
+
+                        if(used >= FIFO_HIGH_WATERMARK && !dev->kfifo_paused) {
+                            dev->kfifo_paused = true;
+                            should_pause = true;
+                        }
+                    }
+                    spin_unlock(&dev->fifo_lock);
+
+                    if(wake_reader) wake_up_interruptible(&dev->read_wait_queue);
+
+                    if(should_pause) {
                         char pause[1] = { minor };
                         send_to_daemon(pause, 1, NCD_MSG_KFIFO_FULL);
                         pr_info("ncd: kfifo %d%% full, pausing daemon for minor %d\n",
                                 used * 100 / FIFO_SIZE, minor);
                     }
-                }
-                if(copied < len - 1) {
-                    pr_warn("ncd: kfifo full, dropped %u bytes\n", len - 1 - copied);
+
+                    if(queued) {
+                        pr_debug("ncd: queued %u bytes for minor %d while kfifo is full\n",
+                                 payload_len, minor);
+                    }
+                    if(dropped) {
+                        pr_err("ncd: pending queue full or data too large, dropped %u bytes for minor %d\n",
+                               payload_len, minor);
+                    }
                 }
             }
             break;
@@ -265,6 +389,8 @@ static void recv_from_daemon(struct sk_buff *skb)
                 init_waitqueue_head(&ncd_devices[minor]->conn_wait_queue);
                 init_waitqueue_head(&ncd_devices[minor]->read_wait_queue);
                 spin_lock_init(&ncd_devices[minor]->fifo_lock);
+                INIT_LIST_HEAD(&ncd_devices[minor]->pending_chunks);
+                ncd_devices[minor]->pending_bytes = 0;
                 atomic_set(&ncd_devices[minor]->open_count, 0);
                 ncd_devices[minor]->conn_status = CONN_WAITING;
                 ncd_devices[minor]->kfifo_paused = false;
@@ -308,6 +434,7 @@ static void recv_from_daemon(struct sk_buff *skb)
                     break;
                 }
                 device_destroy(ncd_class, ncd_devices[minor]->dev_num);
+                ncd_clear_buffers(ncd_devices[minor]);
                 kfifo_free(&ncd_devices[minor]->data_fifo);
                 cdev_del(&ncd_devices[minor]->cdev);
                 ncd_devices[minor]->in_use = false;
@@ -376,7 +503,11 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
 {
     struct ncd_device *dev = filp->private_data;
     unsigned int copied;
+    unsigned int used;
+    unsigned int refilled;
     unsigned long flags;
+    bool should_resume = false;
+    bool wake_reader = false;
     int ret;
 
     if(!dev) {
@@ -399,6 +530,15 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
     }
 
     ret = kfifo_to_user(&dev->data_fifo, buf, count, &copied);
+    refilled = ncd_drain_pending_locked(dev);
+    used = kfifo_len(&dev->data_fifo);
+    if(refilled > 0) wake_reader = true;
+
+    /* resume daemon when pending backlog is empty and kfifo drops below 20% */
+    if(dev->kfifo_paused && list_empty(&dev->pending_chunks) && used < FIFO_LOW_WATERMARK) {
+        dev->kfifo_paused = false;
+        should_resume = true;
+    }
     spin_unlock_irqrestore(&dev->fifo_lock, flags);
 
     if(ret) {
@@ -406,16 +546,13 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
         return -EFAULT;
     }
 
-    /* resume daemon when kfifo drops below 20% */
-    if (dev->kfifo_paused) {
-        unsigned int used = kfifo_len(&dev->data_fifo);
-        if (used < FIFO_SIZE * 20 / 100) {
-            dev->kfifo_paused = false;
-            char resume[1] = { dev->minor };
-            send_to_daemon(resume, 1, NCD_MSG_KFIFO_AVAILABLE);
-            pr_info("ncd: kfifo %d%% free, resuming daemon for minor %d\n",
-                    used * 100 / FIFO_SIZE, dev->minor);
-        }
+    if(wake_reader) wake_up_interruptible(&dev->read_wait_queue);
+
+    if(should_resume) {
+        char resume[1] = { dev->minor };
+        send_to_daemon(resume, 1, NCD_MSG_KFIFO_AVAILABLE);
+        pr_info("ncd: kfifo %d%% free, resuming daemon for minor %d\n",
+                used * 100 / FIFO_SIZE, dev->minor);
     }
 
     return copied;
@@ -471,10 +608,11 @@ static int ncd_release(struct inode *inode, struct file *filp)
 
     spin_lock_irqsave(&dev->fifo_lock, flags);
     kfifo_reset(&dev->data_fifo);
+    ncd_free_pending_locked(dev);
+    dev->kfifo_paused = false;
     spin_unlock_irqrestore(&dev->fifo_lock, flags);
 
     atomic_set(&dev->open_count, 0);
-    dev->kfifo_paused = false;
 
     pr_info("ncd: device released\n");
     return 0;
@@ -540,6 +678,7 @@ static void __exit ncd_exit(void)
         if(!dev || !dev->in_use) continue;
 
         device_destroy(ncd_class, dev->dev_num);
+        ncd_clear_buffers(dev);
         kfifo_free(&dev->data_fifo);
         cdev_del(&dev->cdev);
         kfree(dev);

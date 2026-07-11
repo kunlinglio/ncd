@@ -9,6 +9,8 @@ use tokio::sync::mpsc;
 /// Commands that the main loop sends to the TCP actor task.
 enum WriteCommand {
     Data(Vec<u8>),
+    PauseRead,
+    ResumeRead,
     Close,
 }
 
@@ -66,9 +68,23 @@ impl Device {
 
     /// Send data to the remote peer through the actor task.
     pub fn write(&self, data: Vec<u8>) -> Result<(), DeviceOperationError> {
+        self.send_command(WriteCommand::Data(data))
+    }
+
+    /// Stop pulling packets from the TCP connection while the kernel FIFO is full.
+    pub fn pause_reading(&self) -> Result<(), DeviceOperationError> {
+        self.send_command(WriteCommand::PauseRead)
+    }
+
+    /// Resume pulling packets from the TCP connection once the kernel FIFO has room.
+    pub fn resume_reading(&self) -> Result<(), DeviceOperationError> {
+        self.send_command(WriteCommand::ResumeRead)
+    }
+
+    fn send_command(&self, command: WriteCommand) -> Result<(), DeviceOperationError> {
         match &self.write_tx {
             Some(tx) => tx
-                .send(WriteCommand::Data(data))
+                .send(command)
                 .map_err(|_| DeviceOperationError::ConnectionLost),
             None => Err(DeviceOperationError::NotOpen),
         }
@@ -90,10 +106,12 @@ async fn connection_run(
     data_tx: mpsc::UnboundedSender<(u8, Vec<u8>)>,
     mut write_rx: mpsc::UnboundedReceiver<WriteCommand>,
 ) {
+    let mut read_paused = false;
+
     loop {
         tokio::select! {
             // read from TCP → forward to main loop via data_tx
-            result = libncd_runtime::read(&mut conn) => {
+            result = libncd_runtime::read(&mut conn), if !read_paused => {
                 match result {
                     Ok(data) => {
                         if data_tx.send((minor, data)).is_err() {
@@ -107,14 +125,20 @@ async fn connection_run(
                 }
             }
             // main loop sends command → write to TCP or close
-            Some(cmd) = write_rx.recv() => {
+            cmd = write_rx.recv() => {
                 match cmd {
-                    WriteCommand::Data(data) => {
+                    Some(WriteCommand::Data(data)) => {
                         if libncd_runtime::write(&mut conn, data).await.is_err() {
                             break;
                         }
                     }
-                    WriteCommand::Close => {
+                    Some(WriteCommand::PauseRead) => {
+                        read_paused = true;
+                    }
+                    Some(WriteCommand::ResumeRead) => {
+                        read_paused = false;
+                    }
+                    Some(WriteCommand::Close) => {
                         // protocol-level close, conn consumed
                         match libncd_runtime::close(conn).await {
                             Ok(Ok(remaining)) => {
@@ -127,6 +151,7 @@ async fn connection_run(
                         }
                         return;  // conn is consumed, exit actor
                     }
+                    None => break,
                 }
             }
         }
