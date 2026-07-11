@@ -4,3 +4,10 @@ path = "dummy.py"
 default_port = 10000
 description = "Dummy adapter for testing"
 options = { interval_ms = "100" }
+
+[[adapters]]
+name = "file"
+path = "file.py"
+default_port = 8000
+description = "Map a host file to a device"
+options = { file_path = "/path/to/file" }
