@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::process;
 use tokio::sync::mpsc;
 
-const FIFO_SIZE: usize = 64 * 1024;
+const FIFO_SIZE: usize = 4096;
 const FIFO_HIGH_WATERMARK: usize = FIFO_SIZE * 80 / 100;
 const FIFO_LOW_WATERMARK: usize = FIFO_SIZE * 20 / 100;
 const SHARD_SIZE: usize = FIFO_LOW_WATERMARK; // Maximum size of a single chunk sent to the kernel.

@@ -39,11 +39,10 @@
 #define CONN_FAILED  -1
 
 /* Kfifo buffer size */
-#define FIFO_SIZE (64 * 1024)
+#define FIFO_SIZE 4096
 #define FIFO_HIGH_WATERMARK (FIFO_SIZE * 80 / 100)
 #define FIFO_LOW_WATERMARK  (FIFO_SIZE * 20 / 100)
 #define FIFO_PENDING_LIMIT  (FIFO_SIZE * 256)
-#define NETLINK_DATA_CHUNK  (64 * 1024 - 1024)
 
 
 MODULE_LICENSE("GPL");
@@ -574,34 +573,26 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
 static ssize_t ncd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
 {
     struct ncd_device *dev = filp->private_data;
-    size_t offset = 0;
+    char* kbuf;
     int ret;
 
     if(count == 0) return 0;
 
-    while(offset < count) {
-        size_t chunk_len = min(count - offset, (size_t)NETLINK_DATA_CHUNK);
-        char* kbuf;
+    kbuf = kmalloc(count + 1, GFP_KERNEL);
+    /* Out of memory */
+    if(!kbuf) return -ENOMEM;
 
-        kbuf = kmalloc(chunk_len + 1, GFP_KERNEL);
-        /* Out of memory */
-        if(!kbuf) return offset > 0 ? offset : -ENOMEM;
+    kbuf[0] = dev->minor;
 
-        kbuf[0] = dev->minor;
-
-        if(copy_from_user(kbuf + 1, buf + offset, chunk_len)) {
-            kfree(kbuf);
-            return offset > 0 ? offset : -EFAULT;
-        }
-
-        ret = send_to_daemon(kbuf, chunk_len + 1, NCD_MSG_DATA);
+    if(copy_from_user(kbuf + 1, buf, count)) {
         kfree(kbuf);
-
-        if(ret < 0) return offset > 0 ? offset : ret;
-        offset += chunk_len;
+        return -EFAULT;
     }
 
-    return count;
+    ret = send_to_daemon(kbuf, count + 1, NCD_MSG_DATA);
+    kfree(kbuf);
+
+    return ret < 0 ? ret : count;
 }
 
 
