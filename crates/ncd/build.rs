@@ -53,16 +53,23 @@ fn main() {
     log(format!("Copying Python from {} ...", python_home.display()));
     copy_dir_all(&python_home, &bundle_dir.join("python")).unwrap();
 
-    // 2. Install dependencies with uv
+    // 2. Copy adapters to a staging directory first so `uv pip install` doesn't
+    //    pollute the source tree (which would invalidate the build cache).
+    let adapters_src = manifest_dir.join("adapters");
+    let adapters_staging = out_dir.join("adapters-staging");
+    if adapters_staging.exists() {
+        let _ = std::fs::remove_dir_all(&adapters_staging);
+    }
+    copy_dir_all(&adapters_src, &adapters_staging).unwrap();
+
     let site_packages_dir = bundle_dir.join("site-packages");
-    let adapters_dir = manifest_dir.join("adapters");
     log("Installing python dependencies...");
     let status = Command::new("uv")
         .args(["pip", "install", "--python"])
         .arg(&python_bin)
         .args(["--target"])
         .arg(&site_packages_dir)
-        .arg(&adapters_dir)
+        .arg(&adapters_staging)
         .status()
         .expect("Failed to execute uv");
     assert!(
@@ -70,8 +77,8 @@ fn main() {
         "uv pip install failed — check network connectivity"
     );
 
-    // 3. Copy adapter scripts
-    copy_adapters(&manifest_dir.join("adapters"), &bundle_dir.join("adapters")).unwrap();
+    // 3. Copy adapter scripts (from clean source, not staging)
+    copy_adapters(&adapters_src, &bundle_dir.join("adapters")).unwrap();
 
     // Create deflated zip archive
     let bundle_zip = out_dir.join("bundle.zip");
@@ -190,9 +197,7 @@ fn download(url: &str, dest: &Path) {
             if milestone > last_milestone {
                 log(format!(
                     "Downloading {}% ({}/{} bytes)",
-                    pct,
-                    downloaded,
-                    len,
+                    pct, downloaded, len,
                 ));
                 last_milestone = milestone;
             }
@@ -204,8 +209,9 @@ fn download(url: &str, dest: &Path) {
     #[cfg(windows)]
     {
         if dest.exists() {
-            std::fs::remove_file(dest)
-                .unwrap_or_else(|e| panic!("Failed to remove existing file {}: {}", dest.display(), e));
+            std::fs::remove_file(dest).unwrap_or_else(|e| {
+                panic!("Failed to remove existing file {}: {}", dest.display(), e)
+            });
         }
     }
     std::fs::rename(&part, dest).unwrap();
@@ -225,12 +231,20 @@ fn extract_pbs(tarball: &Path, dest: &Path) {
 
     // Extract entries individually so we can skip symlinks on Windows
     // (creating symlinks requires elevated privileges or Developer Mode).
-    for entry_result in archive
-        .entries()
-        .unwrap_or_else(|e| panic!("Failed to read archive entries in {}: {}", tarball.display(), e))
-    {
-        let mut entry = entry_result
-            .unwrap_or_else(|e| panic!("Failed to read archive entry in {}: {}", tarball.display(), e));
+    for entry_result in archive.entries().unwrap_or_else(|e| {
+        panic!(
+            "Failed to read archive entries in {}: {}",
+            tarball.display(),
+            e
+        )
+    }) {
+        let mut entry = entry_result.unwrap_or_else(|e| {
+            panic!(
+                "Failed to read archive entry in {}: {}",
+                tarball.display(),
+                e
+            )
+        });
 
         let kind = entry.header().entry_type();
         // On Windows, skip symlinks and hardlinks — they require elevated privileges.
@@ -238,9 +252,9 @@ fn extract_pbs(tarball: &Path, dest: &Path) {
             continue;
         }
 
-        entry
-            .unpack_in(dest)
-            .unwrap_or_else(|e| panic!("Failed to extract entry from {}: {}", tarball.display(), e));
+        entry.unpack_in(dest).unwrap_or_else(|e| {
+            panic!("Failed to extract entry from {}: {}", tarball.display(), e)
+        });
     }
 }
 
@@ -323,8 +337,8 @@ fn copy_adapters(src: &Path, dst: &Path) -> std::io::Result<()> {
         let skip = matches!(
             name_str.as_ref(),
             ".venv" | "__pycache__" | ".DS_Store" | "build"
-        ) || name_str.ends_with(".pyc")
-            || name_str.ends_with(".egg-info")
+        ) || name_str.ends_with(".egg-info")
+            || name_str.ends_with(".pyc")
             || name_str == "uv.lock"
             || name_str == "pyproject.toml"
             || name_str.starts_with('.');

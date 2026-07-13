@@ -68,7 +68,11 @@ fn python_home() -> &'static Path {
 }
 
 fn pythonpath() -> String {
-    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let sep = if cfg!(target_os = "windows") {
+        ";"
+    } else {
+        ":"
+    };
     format!(
         "{}{sep}{}",
         drivers_dir().display(),

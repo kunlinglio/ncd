@@ -25,7 +25,7 @@ pub struct Adapter {
     child: Child,
     stdin: ChildStdin,
     /// Receives raw bytes from the adapter's stdout (via internal reader task).
-    data_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    data_rx: mpsc::Receiver<Vec<u8>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,9 +43,7 @@ pub enum AdapterError {
 }
 
 /// Synchronously spawn a Python adapter to list available devices.
-pub fn list_devices(
-    script_path: &Path,
-) -> Result<Vec<RawDevice>, AdapterError> {
+pub fn list_devices(script_path: &Path) -> Result<Vec<RawDevice>, AdapterError> {
     let output = bundle::run_python_sync(script_path)
         .arg("list")
         .stdout(Stdio::piped())
@@ -80,10 +78,7 @@ impl Adapter {
         let script = bundle::drivers_dir().join(&info.path);
 
         let mut cmd = bundle::run_python(&script);
-        cmd.arg(&script)
-            .arg("run")
-            .arg(device_identifier)
-            .arg(device_name);
+        cmd.arg("run").arg(device_identifier).arg(device_name);
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -98,7 +93,7 @@ impl Adapter {
         let stdout = child.stdout.take().expect("stdout should be piped");
 
         // Spawn internal reader task to avoid pipe read un-cancellable problem
-        let (data_tx, data_rx) = mpsc::unbounded_channel();
+        let (data_tx, data_rx) = mpsc::channel(4);
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             let mut reader = tokio::io::BufReader::new(stdout);
@@ -106,7 +101,7 @@ impl Adapter {
                 match reader.read(&mut buf).await {
                     Ok(0) => break, // EOF
                     Ok(n) => {
-                        if data_tx.send(buf[..n].to_vec()).is_err() {
+                        if data_tx.send(buf[..n].to_vec()).await.is_err() {
                             break; // receiver dropped
                         }
                     }
