@@ -1,136 +1,123 @@
-# NCD Linux 应用层 TUI
+# NCD application TUI
 
-[`ncd_tui.py`](./ncd_tui.py) 只实现 Linux 应用层交互，不修改或替代内核驱动、`ncdd`、`ncd` 和现有 adapters。
-
-数据路径保持不变：
+[`ncd_tui.py`](./ncd_tui.py) is only the Linux application layer. It does not modify or replace `ncdd`, `ncd`, the kernel driver, or any adapter. The data path remains:
 
 ```text
-TUI <-> /dev/ncd_* <-> 内核驱动 <-> ncdd <-> NCD 网络协议 <-> ncd <-> adapter
+TUI <-> /dev/ncd_* <-> driver <-> ncdd <-> network <-> ncd <-> adapter
 ```
 
-## 配置和启动
+## Start and select a connection
 
-TUI 按原顺序读取 `/etc/ncd/config.toml` 中的全部 `[[device]]`，不会创建或自动打开默认连接。类型优先从连接名中的 `camera`、`keyboard`、`instruction`、`file` 推断，也兼容默认端口 9000、10000、11000、8000。
-
-```toml
-[[device]]
-name = "ncd_camera"
-remote_ip = "192.168.1.100"
-remote_port = 9000
-
-[[device]]
-name = "ncd_keyboard"
-remote_ip = "192.168.1.100"
-remote_port = 10000
-```
-
-按项目原有方式启动实际设备端 `ncd` 和 Linux 端 `ncdd`，然后运行：
+The TUI reads every `[[device]]` entry from `/etc/ncd/config.toml` in file order. It does not invent or open a default connection.
 
 ```bash
 python3 test/ncd_tui.py
 ```
 
-如果字符设备权限不足，使用 `sudo python3 test/ncd_tui.py`。
-
-## 首页和连接生命周期
-
-首页只显示连接，不 open 任何字符设备：
+On the home page, use one simple selector:
 
 ```text
-ncd/home> 1
-# 或
-ncd/home> open ncd_camera
+control+camera
+control+ncd_keyboard
+1
 ```
 
-进入子页面后只 open 被选择的 `/dev/<name>`。所有子页面支持：
+The selected page opens its connection automatically. `back` closes it automatically. Within that page, `close`, `open`, and `reopen` may be repeated. Common commands are `status`, `help`, `back`, and `quit`.
 
-```text
-status
-close
-open
-reopen
-back
-```
-
-- 进入子页面自动 open。
-- `close`/`open` 可以在当前子页面内重复执行。
-- `back` 自动 close 并返回首页。
-- 离开子页面后没有默认连接继续运行。
-
-现有驱动的 `read()` 是阻塞式的。为避免修改驱动，camera、keyboard、file 的后台读取由 TUI 自己创建的 Linux `fork` 子进程完成；close 时先终止读取子进程，再关闭唯一的字符设备 fd。因此阻塞读取不会妨碍返回首页或再次 open。
-
-## Camera
-
-camera 子页面 open 期间始终持续读取现有 adapter 的 `4 字节长度 + JPEG` 帧，不提供停止接收的 stream 命令。每一帧都会：
-
-1. 完整读出协议帧；
-2. 计算本地 SHA-256；
-3. 写入临时文件并 `fsync`；
-4. 原子发布为最终 `.jpg` 和 `latest.jpg`；
-5. 写入 `frames.jsonl`。
-
-```text
-capture [OUTPUT.jpg]
-latest [OUTPUT.jpg]
-```
-
-保存目录：
-
-```text
-test/runs/<时间>/camera/<连接名>/
-```
+All run data is saved below `test/runs/<UTC time>/`. Every page prints its exact directory.
 
 ## Keyboard
 
-keyboard 页面同时支持现有 adapter 的两个方向：
+The prompt is `linux->device:`. Commands mean:
 
 ```text
-type hello
-tap enter
-press ctrl
-release ctrl
-mode
-listen text
-listen events
+send hello world       type this text in the focused application
+send+hello world       same operation, compact form
+enter                  tap Enter
+key left               tap the Left Arrow key
+combo ctrl+c           hold Ctrl, tap C, release Ctrl
+combo shift+a          hold Shift, tap A, release Shift
+combo command+s        hold Command/Windows, tap S, release it
+down shift             hold Shift
+up shift               release Shift
+raw                     direct input mode; Ctrl-] exits
+listen text             display received press events as readable text/keys
+listen events           display complete received JSON events
+listen off              hide events but continue receiving and saving them
+info                    show receive/send log paths
 ```
 
-设备端物理按键事件会持续写入 `events.jsonl`；Linux 端输入命令按原有 JSON framing 写入字符设备。
+Received input is shown immediately as `device->linux: ...`. Complete events are durably appended to `events.jsonl`; reconstructed text goes to `text.txt`; sent commands go to `commands.jsonl`.
 
-现有 keyboard adapter 没有命令 ACK，因此 TUI 只会准确显示“已写入 NCD”，不会宣称目标应用已经收到。目标输入框还必须有焦点，设备端操作系统也必须允许 pynput 注入输入。
+The existing keyboard adapter has no command ACK. Therefore `written to NCD` means the bytes reached the NCD character-device path; it does not prove the target application accepted the key. On the actual device, the target input box must have focus and the OS must permit `pynput` input injection/listening.
 
-## Instruction
+## Camera
+
+Camera receiving is continuous while the page is open. Every complete image is atomically published as a timestamped `.jpg` and as `latest.jpg`; metadata is durably appended to `frames.jsonl`. Filenames and displayed times use UTC (`...Z`) to avoid ambiguous or incorrect local timestamps.
 
 ```text
-run uname -a
-shell echo hello
-timeout 10000
+status                 receive/save health, frame count, UTC save time and interval
+latest                 print the latest saved path
+latest copy.jpg        copy the latest saved frame
+capture [copy.jpg]     wait for the next frame
+path                   show image and metadata paths
 ```
 
-连接在整个子页面期间保持 open。请求使用 UUID，只有收到现有 instruction adapter 返回的相同 ID、returncode、stdout 和 stderr 后才显示响应。`shell` 仍遵守 adapter 原有的 `allow_shell` 配置。
+To keep the terminal readable, only the first frame and then one status sample about every five seconds are displayed. The sample is a short hexadecimal prefix, never the whole image. Disk saving does not wait for the display-status queue.
+
+`STALE (possible disconnect)` means no frame has arrived recently. With the current blocking character-device interface, an idle connection and a dead peer cannot always be distinguished without changing the driver/ncdd contract; the TUI reports this limitation instead of claiming the connection is healthy.
 
 ## File
 
+The current FileAdapter sends a full snapshot when it opens and whenever the mapped file changes. The TUI always saves those snapshots.
+
 ```text
-cat
-pull [OUTPUT]
-append TEXT
-appendfile PATH
-stat
-reopen
+read                   show up to 4096 bytes from the latest snapshot
+write hello            append text and wait for a returned snapshot
+write+hello            same operation, compact form
+save [OUTPUT]          copy the complete latest snapshot
+writefile PATH         append a local Linux file
+info                   show size, hash, UTC receive time and paths
+reopen                 require a new initial snapshot
 ```
 
-现有 file adapter 会在 open 时和文件发生变化后发送完整快照。TUI 始终接收并保存这些快照：
+A write is reported as confirmed only when a newer snapshot is returned and ends with the exact payload.
 
-- `cat`、`pull`、`stat` 使用最近快照；
-- `reopen` 可强制 adapter 重新发送当前文件；
-- `append`/`appendfile` 使用原有 framing 写入，然后等待 adapter 回传的新快照；只有新快照末尾与 payload 一致时才显示“由回传快照确认”。
+### Required device-side file configuration
 
-该确认表示 payload 已被实际 adapter 写入并能被它重新读出。由于原 adapter 只有 `flush()`、没有应用层 ACK 或 `fsync()`，TUI 不会把它描述为远端持久化 ACK。
+The error `file_path option is required for FileAdapter` means the Windows/actual-device `ncd` configuration is missing the adapter option. It cannot be supplied later by the Linux TUI because the adapter fails before the connection protocol starts. Configure the existing adapter on the device side, for example:
 
-## 测试
+```toml
+[[device]]
+driver = "file"
+device_identifier = "Unspecified"
+device_name = "File Device"
+port = 8000
+options = { file_path = "C:\\Users\\Lenovo\\ncd-share.txt", poll_interval_ms = "200" }
+```
+
+Then restart device-side `ncd` and use `reopen` (or re-enter the file page). The TUI now emits a direct `file_path` diagnosis if no initial snapshot arrives.
+
+## Instruction
+
+The prompt is `linux->device:`; each matched response is shown as `device->linux:` with `ok`, exit code, system, stdout, and stderr.
+
+```text
+exec whoami             run one real executable without a shell
+win dir                 Windows: cmd.exe /d /s /c "dir"
+win echo 12345          Windows command without requiring allow_shell
+unix uname -a           Unix: /bin/sh -lc "uname -a"
+shell echo hello        advanced shell=True mode; requires allow_shell=true
+timeout 10000           set adapter request timeout in milliseconds
+info                    show request/response/stdout/stderr logs
+```
+
+`PROGRAM` in old help was a placeholder; entering `exec PROGRAM ...` cannot work. `win` and `unix` use an argv request, so they avoid the adapter's default `allow_shell=false`. The raw `shell` command intentionally remains subject to that security option. A missing response has a real TUI timeout and is reported as a possible disconnect.
+
+## Verification
 
 ```bash
 python3 -m unittest discover -s test -p 'test_*.py' -v
 ```
 
-测试覆盖：无默认连接、camera 完整落盘、keyboard 双向现有协议、instruction ID 响应、file 回传快照确认、真实 file/instruction adapter 子进程，以及同一页面内重复 open/close。
+The tests cover connection selection, durable camera saves and UTC metadata, keyboard bidirectional events and combinations, instruction request IDs/Windows argv/timeouts, file snapshot confirmation and missing-`file_path` diagnosis, actual existing adapter round trips, and repeated page-local open/close.

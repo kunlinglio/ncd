@@ -128,6 +128,12 @@ remote_port = 10000
             self.assertTrue(received)
             self.assertEqual(page.latest_bytes, jpeg)
             self.assertEqual((page.run_dir / "latest.jpg").read_bytes(), jpeg)
+            records = [
+                json.loads(line)
+                for line in (page.run_dir / "frames.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(records[-1]["saved_at_utc"].endswith("Z"))
+            self.assertIn("interval_ms", records[-1])
             with self.assertRaises(queue.Empty):
                 session.outgoing.get_nowait()
             page.close_connection()
@@ -138,8 +144,10 @@ remote_port = 10000
         with tempfile.TemporaryDirectory() as directory:
             page = ncd_tui.KeyboardPage(make_spec("keyboard"), Path(directory))
             page.session = session
+            messages = []
+            page.print = lambda message="", **_kwargs: messages.append(message)
             self.assertTrue(page.open_connection())
-            page.send_keyboard_command({"action": "type", "text": "hello"})
+            page.do_send("+hello")
             command = session.outgoing.get(timeout=1)
             self.assertEqual(command["action"], "type")
             self.assertEqual(command["text"], "hello")
@@ -149,7 +157,37 @@ remote_port = 10000
                 ncd_tui.time.sleep(0.01)
             self.assertTrue(event_log.exists())
             self.assertIn('"key": "x"', event_log.read_text(encoding="utf-8"))
+            while not any("device->linux:" in message for message in messages) and ncd_tui.time.monotonic() < deadline:
+                ncd_tui.time.sleep(0.01)
+            self.assertTrue(any("device->linux: 'x'" in message for message in messages))
+            page._drain_keyboard_events()
+            self.assertEqual(page.keyboard_event_count, 1)
+
+            page.do_combo("ctrl+shift+a")
+            combo = [session.outgoing.get(timeout=1) for _ in range(5)]
+            self.assertEqual(
+                [(item["action"], item["key"]) for item in combo],
+                [
+                    ("press", "ctrl"),
+                    ("press", "shift"),
+                    ("tap", "a"),
+                    ("release", "shift"),
+                    ("release", "ctrl"),
+                ],
+            )
             page.close_connection()
+
+    def test_home_accepts_control_plus_kind_and_short_name(self):
+        connections = [
+            ncd_tui.ConnectionSpec("ncd_camera", "camera", "/dev/ncd_camera"),
+            ncd_tui.ConnectionSpec("ncd_keyboard", "keyboard", "/dev/ncd_keyboard"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            tui = ncd_tui.NcdTui(connections, Path(directory))
+            self.assertEqual(tui._find_connection("camera").name, "ncd_camera")
+            self.assertEqual(tui._find_connection("ncd_keyboard").kind, "keyboard")
+            self.assertEqual(tui._find_connection("keyboard").path, "/dev/ncd_keyboard")
+            self.assertEqual(tui.parseline("control+ncd_keyboard")[:2], ("control", "+ncd_keyboard"))
 
     def test_instruction_request_matches_response_id(self):
         session = QueueSession()
@@ -177,15 +215,58 @@ remote_port = 10000
             page.close_connection()
         worker.join(timeout=1)
 
+    def test_instruction_win_uses_argv_without_shell_permission(self):
+        session = QueueSession()
+        captured = []
+
+        def device():
+            request = session.outgoing.get(timeout=2)
+            captured.append(request)
+            session.incoming.put(
+                {
+                    "id": request["id"],
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "system": "Windows",
+                }
+            )
+
+        worker = threading.Thread(target=device, daemon=True)
+        worker.start()
+        with tempfile.TemporaryDirectory() as directory:
+            page = ncd_tui.InstructionPage(make_spec("instruction"), Path(directory))
+            page.session = session
+            self.assertTrue(page.open_connection())
+            page.do_win("echo 12345")
+            self.assertEqual(
+                captured[0]["argv"], ["cmd.exe", "/d", "/s", "/c", "echo 12345"]
+            )
+            self.assertNotIn("shell", captured[0])
+            page.close_connection()
+        worker.join(timeout=1)
+
+    def test_instruction_reader_has_real_application_timeout(self):
+        session = QueueSession()
+        with tempfile.TemporaryDirectory() as directory:
+            page = ncd_tui.InstructionPage(make_spec("instruction"), Path(directory))
+            page.session = session
+            session.open()
+            with self.assertRaisesRegex(TimeoutError, "may be disconnected"):
+                page._read_matching_response("missing", 0.05)
+            session.close()
+
     def test_file_append_is_confirmed_by_existing_adapter_snapshot(self):
         session = QueueSession()
         state = bytearray(b"initial")
         session.incoming.put(bytes(state))
 
         def device():
-            payload = session.outgoing.get(timeout=2)
-            state.extend(payload)
-            session.incoming.put(bytes(state))
+            for _ in range(2):
+                payload = session.outgoing.get(timeout=2)
+                state.extend(payload)
+                session.incoming.put(bytes(state))
 
         worker = threading.Thread(target=device, daemon=True)
         worker.start()
@@ -197,8 +278,20 @@ remote_port = 10000
             self.assertEqual(initial.read_bytes(), b"initial")
             page._append(b"payload")
             self.assertEqual(page._latest_data(), b"initialpayload")
+            page.do_write("+more")
             page.close_connection()
         worker.join(timeout=1)
+
+    def test_file_open_explains_missing_remote_file_path(self):
+        session = QueueSession()
+        with tempfile.TemporaryDirectory() as directory:
+            page = ncd_tui.FilePage(make_spec("file"), Path(directory))
+            page.session = session
+            messages = []
+            page.print = lambda message="", **_kwargs: messages.append(message)
+            with patch.object(page, "_wait_snapshot", side_effect=TimeoutError):
+                self.assertFalse(page.open_connection())
+            self.assertTrue(any("file_path" in message for message in messages))
 
     def test_session_can_open_close_and_open_again_inside_page_lifetime(self):
         with tempfile.TemporaryDirectory() as directory:
