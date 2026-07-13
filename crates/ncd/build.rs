@@ -24,7 +24,7 @@ fn log(msg: impl Into<String>) {
 
 fn main() {
     // Re-run build script when these files change
-    // println!("cargo:rerun-if-changed=adapters/");
+    println!("cargo:rerun-if-changed=adapters/");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 
@@ -35,7 +35,7 @@ fn main() {
     // Download Python and resolve Python home
     let meta = read_bundle_meta();
     let python_home = download_from_pbs(&meta, &target_dir.join("pbs-cache"));
-    let python_bin = python_home.join("bin").join(python_exe_name());
+    let python_bin = python_bin_path(&python_home);
     assert!(
         python_bin.exists(),
         "Python binary not found at {}",
@@ -130,7 +130,7 @@ fn download_from_pbs(meta: &BundleMeta, cache_dir: &Path) -> PathBuf {
     }
 
     let python_dir = cache_dir.join("python");
-    if !python_dir.join("bin").join(python_exe_name()).exists() {
+    if !python_bin_path(&python_dir).exists() {
         log("Extracting python-build-standalone ...".to_string());
         extract_pbs(&tarball, &cache_dir);
     }
@@ -145,6 +145,7 @@ fn pbs_target() -> &'static str {
         "x86_64-apple-darwin" => "x86_64-apple-darwin",
         "x86_64-unknown-linux-gnu" => "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu" => "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc" => "x86_64-pc-windows-msvc",
         other => panic!(
             "Unsupported target: {other}.\n\
              Set NCD_PYTHON_HOME=/path/to/python/install to use a pre-downloaded Python."
@@ -198,6 +199,15 @@ fn download(url: &str, dest: &Path) {
         }
     }
     drop(file);
+    // On Windows, rename fails if the destination already exists (unlike Unix
+    // where it atomically replaces). Remove it first so the rename succeeds.
+    #[cfg(windows)]
+    {
+        if dest.exists() {
+            std::fs::remove_file(dest)
+                .unwrap_or_else(|e| panic!("Failed to remove existing file {}: {}", dest.display(), e));
+        }
+    }
     std::fs::rename(&part, dest).unwrap();
     if len > 0 && downloaded != len {
         panic!(
@@ -212,9 +222,26 @@ fn extract_pbs(tarball: &Path, dest: &Path) {
         .unwrap_or_else(|e| panic!("Failed to open {}: {}", tarball.display(), e));
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
-    archive
-        .unpack(dest)
-        .unwrap_or_else(|e| panic!("Failed to extract {}: {}", tarball.display(), e));
+
+    // Extract entries individually so we can skip symlinks on Windows
+    // (creating symlinks requires elevated privileges or Developer Mode).
+    for entry_result in archive
+        .entries()
+        .unwrap_or_else(|e| panic!("Failed to read archive entries in {}: {}", tarball.display(), e))
+    {
+        let mut entry = entry_result
+            .unwrap_or_else(|e| panic!("Failed to read archive entry in {}: {}", tarball.display(), e));
+
+        let kind = entry.header().entry_type();
+        // On Windows, skip symlinks and hardlinks — they require elevated privileges.
+        if cfg!(windows) && (kind == tar::EntryType::Symlink || kind == tar::EntryType::Link) {
+            continue;
+        }
+
+        entry
+            .unpack_in(dest)
+            .unwrap_or_else(|e| panic!("Failed to extract entry from {}: {}", tarball.display(), e));
+    }
 }
 
 fn python_exe_name() -> &'static str {
@@ -222,6 +249,17 @@ fn python_exe_name() -> &'static str {
         "python.exe"
     } else {
         "python3"
+    }
+}
+
+/// Return the path to the Python interpreter inside a PBS installation directory.
+fn python_bin_path(python_home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        // Windows PBS layout: python/python.exe (no "bin" subdirectory)
+        python_home.join(python_exe_name())
+    } else {
+        // Unix PBS layout: python/bin/python3
+        python_home.join("bin").join(python_exe_name())
     }
 }
 
@@ -238,19 +276,30 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         if ty.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else if ty.is_symlink() {
-            let target = std::fs::read_link(&src_path)?;
             #[cfg(unix)]
             {
+                let target = std::fs::read_link(&src_path)?;
                 std::os::unix::fs::symlink(&target, &dst_path)?;
             }
             #[cfg(windows)]
             {
-                // Windows symlinks require elevated privileges; copy the resolved target instead
-                let resolved = std::fs::canonicalize(&src_path)?;
-                if resolved.is_dir() {
-                    copy_dir_all(&resolved, &dst_path)?;
-                } else {
-                    std::fs::copy(&resolved, &dst_path)?;
+                // Windows symlinks require elevated privileges; copy the resolved target instead.
+                // If the target cannot be resolved (e.g., broken symlink), skip it gracefully.
+                match std::fs::canonicalize(&src_path) {
+                    Ok(resolved) => {
+                        if resolved.is_dir() {
+                            copy_dir_all(&resolved, &dst_path)?;
+                        } else {
+                            std::fs::copy(&resolved, &dst_path)?;
+                        }
+                    }
+                    Err(e) => {
+                        // Broken or unresolvable symlink — skip it.
+                        log(format!(
+                            "Skipping symlink {} (cannot resolve target): {e}",
+                            src_path.display()
+                        ));
+                    }
                 }
             }
         } else {
