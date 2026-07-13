@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::process;
 use tokio::sync::mpsc;
 
-const FIFO_SIZE: usize = 4096;
+const FIFO_SIZE: usize = 4096; // FIFO size of kernel
 const FIFO_HIGH_WATERMARK: usize = FIFO_SIZE * 80 / 100;
 const FIFO_LOW_WATERMARK: usize = FIFO_SIZE * 20 / 100;
 const SHARD_SIZE: usize = FIFO_LOW_WATERMARK; // Maximum size of a single chunk sent to the kernel.
@@ -185,7 +185,7 @@ fn queue_shards(queue: &mut VecDeque<Vec<u8>>, data: Vec<u8>) {
 /// Flush queued chunks to the kernel.
 /// Stop if:
 /// - kernel back-pressure is active;
-/// - sending the next chunk would exceed the high watermark.
+/// - inflight size exceeds the high watermark of kernel (it will cause back-pressure soon).
 /// If sending fails, the chunk is pushed back to the front of the queue.
 async fn flush_device(
     nl: &NetlinkSocket,
@@ -199,7 +199,7 @@ async fn flush_device(
     }
 
     while let Some(chunk_len) = pending[minor].front().map(|chunk| chunk.len()) {
-        if inflight[minor] + chunk_len > FIFO_HIGH_WATERMARK {
+        if inflight[minor] > FIFO_HIGH_WATERMARK {
             break;
         }
 
