@@ -53,11 +53,12 @@ pub fn drivers_dir() -> &'static Path {
 fn python_path() -> &'static Path {
     static CACHED: OnceLock<PathBuf> = OnceLock::new();
     CACHED.get_or_init(|| {
-        bundle()
-            .cache_dir
-            .join("python")
-            .join("bin")
-            .join(python_binary_name())
+        let python_dir = bundle().cache_dir.join("python");
+        if cfg!(target_os = "windows") {
+            python_dir.join(python_binary_name())
+        } else {
+            python_dir.join("bin").join(python_binary_name())
+        }
     })
 }
 
@@ -67,8 +68,9 @@ fn python_home() -> &'static Path {
 }
 
 fn pythonpath() -> String {
+    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
     format!(
-        "{}:{}",
+        "{}{sep}{}",
         drivers_dir().display(),
         site_packages_dir().display(),
     )
