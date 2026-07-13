@@ -53,7 +53,7 @@ pub fn get_all_devices() -> Vec<DeviceInfo> {
 
     for adapter in &adapters.adapters {
         let script_path = bundle::drivers_dir().join(&adapter.path);
-        match adapter::list_devices(bundle::drivers_dir(), &script_path) {
+        match adapter::list_devices(&script_path) {
             Ok(raw_devices) => {
                 for (i, raw) in raw_devices.into_iter().enumerate() {
                     devices.push(DeviceInfo {

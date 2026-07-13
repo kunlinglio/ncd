@@ -16,7 +16,13 @@ use state::TuiState;
 pub fn run_tui() -> Option<HostConfig> {
     let mut stdout = io::stdout();
     crossterm::terminal::enable_raw_mode().expect("Failed to enable raw mode");
-    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide).ok();
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        event::EnableBracketedPaste,
+        cursor::Hide
+    )
+    .ok();
 
     let mut state = TuiState::new();
     // Main loop
@@ -38,6 +44,9 @@ pub fn run_tui() -> Option<HostConfig> {
                     state.handle_key(key.code);
                 }
             }
+            Ok(event::Event::Paste(text)) => {
+                state.handle_paste(&text);
+            }
             Ok(event::Event::Resize(_, _)) => {
                 // Redraw on resize
             }
@@ -46,7 +55,13 @@ pub fn run_tui() -> Option<HostConfig> {
     };
 
     // Restore terminal
-    execute!(stdout, cursor::Show, terminal::LeaveAlternateScreen).ok();
+    execute!(
+        stdout,
+        cursor::Show,
+        event::DisableBracketedPaste,
+        terminal::LeaveAlternateScreen
+    )
+    .ok();
     terminal::disable_raw_mode().ok();
 
     result

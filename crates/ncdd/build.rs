@@ -15,7 +15,10 @@ fn main() {
     for entry in walkdir::WalkDir::new(&driver_root)
         .min_depth(1)
         .into_iter()
-        .filter_entry(|e| e.file_name() != "build")  // skip build artifacts
+        .filter_entry(|e| {
+            // skip build artifacts
+            e.file_name() != "build"
+        })
     {
         let entry = entry.unwrap();
         let path = entry.path();

@@ -44,12 +44,10 @@ pub enum AdapterError {
 
 /// Synchronously spawn a Python adapter to list available devices.
 pub fn list_devices(
-    adapter_dir: &Path,
     script_path: &Path,
 ) -> Result<Vec<RawDevice>, AdapterError> {
     let output = bundle::run_python_sync(script_path)
         .arg("list")
-        .env("PYTHONPATH", adapter_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()

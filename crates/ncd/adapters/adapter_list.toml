@@ -1,13 +1,27 @@
 [[adapters]]
-name = "dummy"
-path = "dummy.py"
-default_port = 10000
-description = "Dummy adapter for testing"
-options = { interval_ms = "100" }
-
-[[adapters]]
 name = "file"
 path = "file.py"
 default_port = 8000
 description = "Map a host file to a device"
-options = { file_path = "/path/to/file" }
+options = { file_path = "", poll_interval_ms = "200" }
+
+[[adapters]]
+name = "camera"
+path = "camera.py"
+default_port = 9000
+description = "Camera adapter"
+options = { width = "", height = "", fps = "", jpeg_quality = "80" }
+
+[[adapters]]
+name = "keyboard"
+path = "keyboard.py"
+default_port = 10000
+description = "Keyboard adapter"
+options = { listen = "true", inject = "true", suppress = "false" }
+
+[[adapters]]
+name = "instruction"
+path = "instruction.py"
+default_port = 11000
+description = "Run commands on the host system"
+options = { timeout_ms = "5000", cwd = "", allow_shell = "false", encoding = "" }

@@ -7,7 +7,18 @@ name = "ncd-adapters"
 version = "0.1.0"
 description = "NCD host-side device adapter drivers"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "opencv-python",
+    "pynput",
+    "evdev; platform_system == 'Linux'",
+    "python-xlib; platform_system == 'Linux'",
+]
 
 [tool.setuptools]
-py-modules = ["base", "dummy", "file"]
+py-modules = [
+    "base", 
+    "file", 
+    "camera",
+    "keyboard",
+    "instruction"
+]

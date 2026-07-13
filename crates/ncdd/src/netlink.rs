@@ -35,7 +35,7 @@ struct SockAddrNl {
 }
 
 const NLMSG_HDRLEN: usize = 16; // mem::size_of::<NlMsgHdr>()
-const RECV_BUF_SIZE: usize = 4096;
+const RECV_BUF_SIZE: usize = 64 * 1024 + 1024;
 fn nlmsg_align(len: usize) -> usize {
     (len + 3) & !3
 } // align to 4 bytes
@@ -271,6 +271,12 @@ impl NetlinkSocket {
         }
 
         let recv_len = ret as usize;
+        if (msg.msg_flags & libc::MSG_TRUNC) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated netlink message",
+            ));
+        }
         if recv_len < NLMSG_HDRLEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

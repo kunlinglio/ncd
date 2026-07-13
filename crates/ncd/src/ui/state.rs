@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crossterm::event::KeyCode;
 
-use crate::adapter_loader::list::{get_all_devices, DeviceInfo};
+use crate::adapter_loader::list::{DeviceInfo, get_all_devices};
 use crate::config::{DeviceEntry, HostConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +145,7 @@ impl TuiState {
                     .option_keys
                     .iter()
                     .zip(r.field_values.iter())
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|(k, v)| (k.clone(), sanitize_option_value(k, v)))
                     .collect();
                 DeviceEntry {
                     driver: r.info.adapter_name.clone(),
@@ -164,6 +164,12 @@ impl TuiState {
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Editing(_) => self.handle_editing_key(key),
+        }
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Mode::Editing(field_idx) = self.mode {
+            self.get_field_value_mut(field_idx).push_str(text);
         }
     }
 
@@ -252,5 +258,21 @@ impl TuiState {
             Mode::Normal => None,
         }
     }
+}
 
+fn sanitize_option_value(key: &str, value: &str) -> String {
+    if key != "file_path" {
+        return value.to_string();
+    }
+
+    let trimmed = value.trim();
+    let quoted = trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')));
+
+    if quoted {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

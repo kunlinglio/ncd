@@ -320,8 +320,11 @@ fn copy_adapters(src: &Path, dst: &Path) -> std::io::Result<()> {
         let dst_path = dst.join(&name);
 
         // Skip venv, cache dirs, and uv metadata
-        let skip = matches!(name_str.as_ref(), ".venv" | "__pycache__" | ".DS_Store")
-            || name_str.ends_with(".pyc")
+        let skip = matches!(
+            name_str.as_ref(),
+            ".venv" | "__pycache__" | ".DS_Store" | "build"
+        ) || name_str.ends_with(".pyc")
+            || name_str.ends_with(".egg-info")
             || name_str == "uv.lock"
             || name_str == "pyproject.toml"
             || name_str.starts_with('.');
