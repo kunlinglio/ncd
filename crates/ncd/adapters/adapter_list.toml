@@ -17,7 +17,7 @@ name = "keyboard"
 path = "keyboard.py"
 default_port = 10000
 description = "Keyboard adapter"
-options = { listen = "true", inject = "true", suppress = "false" }
+options = { listen = "true", inject = "true", suppress = "false", echo_injected = "false" }
 
 [[adapters]]
 name = "instruction"

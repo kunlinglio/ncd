@@ -4,6 +4,7 @@ import platform
 import cv2
 import io
 import struct
+import sys
 
 MAX_CAMERA_NUM = 4
 
@@ -18,6 +19,9 @@ def get_os_platform() -> tuple[int, str]:
     raise RuntimeError(f"Unsupported platform: {system}")
 
 class CameraAdapter(Adapter):
+    def _log(self, message: str):
+        print(f"[camera adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+
     @classmethod
     def list_devices(cls) -> list[Device]:
         backend, backend_name = get_os_platform()
@@ -50,11 +54,13 @@ class CameraAdapter(Adapter):
         os, _ = get_os_platform()
         index = int(self.device_identifier)
 
+        self._log(f"open requested options={options}")
         self.capture = cv2.VideoCapture(index, os)
 
         if not self.capture.isOpened():
             self.capture.release()
             self.capture = None
+            self._log("open failed")
             raise RuntimeError(f"failed to open camera {index}")
 
         width = options.get("width")
@@ -73,6 +79,10 @@ class CameraAdapter(Adapter):
         self.fps = self.capture.get(cv2.CAP_PROP_FPS)
 
         self.jpeg_quality = int(options.get("jpeg_quality") or "80")
+        self._log(
+            f"opened width={self.width} height={self.height} "
+            f"fps={self.fps} jpeg_quality={self.jpeg_quality}"
+        )
 
     def read(self) -> bytes:
         if self.capture is None:
@@ -92,12 +102,15 @@ class CameraAdapter(Adapter):
             raise RuntimeError("failed to encode camera frame")
 
         payload = encoded.tobytes()
+        self._log(f"read frame jpeg={len(payload)} bytes")
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
+        self._log(f"write rejected bytes={len(data)}")
         raise io.UnsupportedOperation("Can not write to the device: camera is read-only")
     
     def close(self):
         if self.capture is not None:
+            self._log("close")
             self.capture.release()
             self.capture = None

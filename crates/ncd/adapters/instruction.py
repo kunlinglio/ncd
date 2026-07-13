@@ -6,9 +6,13 @@ import platform
 import queue
 import struct
 import subprocess
+import sys
 
 
 class InstructionAdapter(Adapter):
+    def _log(self, message: str):
+        print(f"[instruction adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+
     @classmethod
     def list_devices(cls) -> list[Device]:
         system = platform.system()
@@ -25,13 +29,24 @@ class InstructionAdapter(Adapter):
         self.cwd = options.get("cwd") or None
         self.allow_shell = options.get("allow_shell", "false").lower() == "true"
         self.encoding = options.get("encoding") or locale.getpreferredencoding(False)
+        self.responses = queue.Queue()
+        self.input_buffer = b""
+        self._log(
+            f"open timeout_ms={self.timeout_ms} cwd={self.cwd} "
+            f"allow_shell={self.allow_shell} encoding={self.encoding}"
+        )
 
     def read(self) -> bytes:
         response = self.responses.get()
         payload = json.dumps(response).encode("utf-8")
+        self._log(
+            f"read response id={response.get('id')} "
+            f"returncode={response.get('returncode')} payload={len(payload)} bytes"
+        )
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
+        self._log(f"write bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -45,6 +60,7 @@ class InstructionAdapter(Adapter):
 
             request = json.loads(payload.decode("utf-8"))
             request_id = request.get("id")
+            self._log(f"execute request id={request_id} request={request}")
 
             try:
                 shell = bool(request.get("shell", False))
@@ -87,7 +103,12 @@ class InstructionAdapter(Adapter):
                     "system": platform.system(),
                 }
 
+            self._log(
+                f"request finished id={request_id} "
+                f"returncode={response.get('returncode')} ok={response.get('ok')}"
+            )
             self.responses.put(response)
 
     def close(self):
+        self._log("close")
         return

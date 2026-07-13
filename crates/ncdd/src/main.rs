@@ -1,5 +1,6 @@
 mod config;
 mod device;
+mod device_parser;
 mod driver;
 mod netlink;
 mod start;

@@ -1,5 +1,6 @@
 import os
 import struct
+import sys
 import threading
 import time
 
@@ -23,6 +24,9 @@ class FileAdapter(Adapter):
     def _pack_payload(payload: bytes) -> bytes:
         return struct.pack("!I", len(payload)) + payload
 
+    def _log(self, message: str):
+        print(f"[file adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+
     @classmethod
     def list_devices(cls) -> list[Device]:
         return [
@@ -34,6 +38,7 @@ class FileAdapter(Adapter):
         ]
 
     def open(self, options: dict[str, str]):
+        self._log(f"open requested options={options}")
         self.file_path = options.get("file_path")
         if not self.file_path:
             raise ValueError("file_path option is required for FileAdapter")
@@ -48,6 +53,7 @@ class FileAdapter(Adapter):
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
         self.file = open(self.file_path, "a+b")
+        self._log(f"opened path={self.file_path} poll_interval={self.poll_interval}s")
 
     def read(self) -> bytes:
         while True:
@@ -59,11 +65,13 @@ class FileAdapter(Adapter):
 
             if signature != self.last_signature:
                 self.last_signature = signature
+                self._log(f"read snapshot bytes={len(data)} signature={signature}")
                 return self._pack_payload(data)
 
             time.sleep(self.poll_interval)
 
     def write(self, data: bytes):
+        self._log(f"write bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -74,19 +82,20 @@ class FileAdapter(Adapter):
 
             payload = self.input_buffer[4:frame_len]
             self.input_buffer = self.input_buffer[frame_len:]
-            self._write_file(payload)
+            self._append_file(payload)
 
-    def _write_file(self, data: bytes):
+    def _append_file(self, data: bytes):
         with self.lock:
-            self.file.seek(0)
-            self.file.truncate(0)
+            self.file.seek(0, os.SEEK_END)
             self.file.write(data)
             self.file.flush()
             stat = os.fstat(self.file.fileno())
-            self.last_signature = (stat.st_mtime_ns, stat.st_size)
+            signature = (stat.st_mtime_ns, stat.st_size)
+            self._log(f"file appended bytes={len(data)} signature={signature}")
 
     def close(self):
         file = getattr(self, "file", None)
         if file is not None:
+            self._log("close")
             file.close()
             self.file = None
