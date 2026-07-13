@@ -497,6 +497,7 @@ static int ncd_open(struct inode *inode, struct file *filp)
 {
     struct ncd_device *dev = container_of(inode->i_cdev, struct ncd_device, cdev);
     int ret;
+    unsigned long flags;
 
     /* Ensure exclusive access */
     if (atomic_cmpxchg(&dev->open_count, 0, 1) != 0)
@@ -508,6 +509,12 @@ static int ncd_open(struct inode *inode, struct file *filp)
     filp->private_data = dev;
 
     dev->conn_status = CONN_WAITING;
+
+    spin_lock_irqsave(&dev->fifo_lock, flags);
+    kfifo_reset(&dev->data_fifo);
+    ncd_free_pending_locked(dev);
+    dev->kfifo_paused = false;
+    spin_unlock_irqrestore(&dev->fifo_lock, flags);
 
     char payload[1] = {dev->minor};
 
