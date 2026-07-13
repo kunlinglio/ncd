@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 use libncd_runtime::{self, ConnHandler, OpenParams, error::ConnectionClosed};
 
@@ -21,30 +22,29 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
         return Err(RuntimeError::NoDevices);
     }
 
-    // Spawn all device actors
+    // Spawn a reconnecting actor for each device entry.
     let mut tasks = tokio::task::JoinSet::new();
     for entry in &config.device {
-        let adapter = Adapter::spawn(
-            &entry.driver,
-            &entry.device_identifier,
-            &entry.device_name,
-            &entry.options,
-        )
-        .await?;
-
-        let conn = libncd_runtime::open(OpenParams::Host {
-            listen_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            listen_port: entry.port,
-        })
-        .await?;
-
         let name = format!("{}:{}", entry.driver, entry.port);
         eprintln!("[{name}] Listening on port {}...", entry.port);
 
-        tasks.spawn(device_actor(conn, adapter, name));
+        let port = entry.port;
+        let driver = entry.driver.clone();
+        let identifier = entry.device_identifier.clone();
+        let device_name = entry.device_name.clone();
+        let options = entry.options.clone();
+
+        tasks.spawn(device_actor(
+            name,
+            port,
+            driver,
+            identifier,
+            device_name,
+            options,
+        ));
     }
 
-    // Wait for all actors to complete, or Ctrl+C to shutdown
+    // Keep running until Ctrl+C or all actors fail.
     let all_done = async {
         while let Some(result) = tasks.join_next().await {
             match result {
@@ -68,9 +68,55 @@ pub async fn run(config: HostConfig) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-async fn device_actor(mut conn: ConnHandler, mut adapter: Adapter, name: String) {
+async fn device_actor(
+    name: String,
+    port: u16,
+    driver: String,
+    identifier: String,
+    device_name: String,
+    options: std::collections::HashMap<String, String>,
+) {
     loop {
-        // Check if the adapter process has exited
+        // Accept a new NCD connection.
+        let conn = match libncd_runtime::open(OpenParams::Host {
+            listen_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            listen_port: port,
+        })
+        .await
+        {
+            Ok(conn) => {
+                eprintln!("[{name}] Connection accepted");
+                conn
+            }
+            Err(e) => {
+                eprintln!("[{name}] Failed to accept: {e}, retrying...");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        // Spawn a fresh adapter process for this connection.
+        let adapter = match Adapter::spawn(&driver, &identifier, &device_name, &options).await {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("[{name}] Failed to spawn adapter: {e}");
+                let _ = libncd_runtime::close(conn).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        // Bridge data until the connection or adapter closes.
+        handle_connection(conn, adapter, &name).await;
+
+        eprintln!("[{name}] Peer disconnected, re-listening...");
+    }
+}
+
+/// Bidirectional bridge between one NCD connection and one adapter process.
+async fn handle_connection(mut conn: ConnHandler, mut adapter: Adapter, name: &str) {
+    loop {
+        // Check if the adapter process has exited.
         if let Some(status) = adapter.try_exit_status() {
             if !status.success() {
                 eprintln!("[{name}] Adapter exited with {status}");
@@ -114,7 +160,7 @@ async fn device_actor(mut conn: ConnHandler, mut adapter: Adapter, name: String)
                         }
                     }
                     None => {
-                        // Adapters stdout closed — process exited
+                        // Adapter stdout closed — process exited.
                         eprintln!("[{name}] Adapter stdout closed");
                         break;
                     }
@@ -123,14 +169,14 @@ async fn device_actor(mut conn: ConnHandler, mut adapter: Adapter, name: String)
         }
     }
 
-    // Cleanup
+    // Cleanup.
     let _ = adapter.kill().await;
     match libncd_runtime::close(conn).await {
         Ok(Ok(remaining)) => {
             if !remaining.is_empty() {
                 eprintln!(
-                    "[{name}] {remaining_len} unread messages discarded on close",
-                    remaining_len = remaining.len()
+                    "[{name}] {} unread messages discarded on close",
+                    remaining.len()
                 );
             }
         }
