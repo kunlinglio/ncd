@@ -1,21 +1,18 @@
-# NCD Linux TUI 使用说明
+# NCD Linux 应用层 TUI
 
-这个目录提供 Linux 端应用层测试程序：[ncd_tui.py](./ncd_tui.py)。
+[`ncd_tui.py`](./ncd_tui.py) 只实现 Linux 应用层交互，不修改或替代内核驱动、`ncdd`、`ncd` 和现有 adapters。
 
-它不直接连 TCP，也不替代 `ncdd`。它只读写 `/dev/ncd_*` 字符设备；内核驱动和 `ncdd` 仍然负责与远端实际设备建立连接和转发数据。
+数据路径保持不变：
 
-## 1. 配置 `/etc/ncd/config.toml`
+```text
+TUI <-> /dev/ncd_* <-> 内核驱动 <-> ncdd <-> NCD 网络协议 <-> ncd <-> adapter
+```
 
-Linux 端需要在 `/etc/ncd/config.toml` 中配置远端实际设备端的 IP 和端口。每个设备一个 `[[device]]`。
+## 配置和启动
 
-推荐设备名包含设备类型，方便 TUI 自动识别：
+TUI 按原顺序读取 `/etc/ncd/config.toml` 中的全部 `[[device]]`，不会创建或自动打开默认连接。类型优先从连接名中的 `camera`、`keyboard`、`instruction`、`file` 推断，也兼容默认端口 9000、10000、11000、8000。
 
 ```toml
-[[device]]
-name = "ncd_file"
-remote_ip = "192.168.1.100"
-remote_port = 8000
-
 [[device]]
 name = "ncd_camera"
 remote_ip = "192.168.1.100"
@@ -25,210 +22,115 @@ remote_port = 9000
 name = "ncd_keyboard"
 remote_ip = "192.168.1.100"
 remote_port = 10000
-
-[[device]]
-name = "ncd_instruction"
-remote_ip = "192.168.1.100"
-remote_port = 11000
 ```
 
-说明：
-
-- `name`：Linux 端创建的字符设备名，例如 `ncd_camera` 会创建 `/dev/ncd_camera`。
-- `remote_ip`：实际设备端运行 `ncd` 的机器 IP。
-- `remote_port`：实际设备端对应设备监听端口。
-
-如果设备名不包含 `camera` / `keyboard` / `instruction` / `file`，TUI 会按默认端口推断：
-
-- `8000`：file
-- `9000`：camera
-- `10000`：keyboard
-- `11000`：instruction
-
-## 2. 启动顺序
-
-实际设备端先启动 `ncd`，选择并暴露设备。
-
-Linux 端启动 `ncdd`，让它加载内核驱动并创建 `/dev/ncd_*`：
-
-```bash
-sudo ./ncdd
-```
-
-确认设备已经创建：
-
-```bash
-ls -l /dev/ncd_*
-```
-
-然后启动 TUI：
+按项目原有方式启动实际设备端 `ncd` 和 Linux 端 `ncdd`，然后运行：
 
 ```bash
 python3 test/ncd_tui.py
 ```
 
-如果没有 `/dev/ncd_*` 读写权限，使用：
+如果字符设备权限不足，使用 `sudo python3 test/ncd_tui.py`。
 
-```bash
-sudo python3 test/ncd_tui.py
-```
+## 首页和连接生命周期
 
-## 3. TUI 启动后的默认行为
-
-启动后首页会直接显示设备路径、日志目录和常用命令。
-
-默认会自动执行：
-
-- camera：持续读取摄像头 JPEG 帧，并保存到 `test/runs/<时间>/camera/`。
-- keyboard：持续监听实际设备端键盘输入，并在 Linux 终端显示文本。
-
-日志和结果会保存在：
+首页只显示连接，不 open 任何字符设备：
 
 ```text
-test/runs/<时间>/
+ncd/home> 1
+# 或
+ncd/home> open ncd_camera
 ```
 
-## 4. 常用命令
-
-### Keyboard
-
-进入键盘直通模式：
-
-```text
-keyboard mode
-```
-
-预期结果：
-
-- Linux 终端里输入的字符会写入远端实际设备端键盘。
-- 远端实际设备端收到后，会在当前焦点应用中打字。
-- 按 `Ctrl-]` 退出键盘直通模式。
-
-查看原始键盘事件：
-
-```text
-keyboard listen start events
-```
-
-### Camera
-
-camera 默认会自动接收并保存图片。
-
-停止自动接收：
-
-```text
-camera stream stop
-```
-
-重新开始自动接收，每 1 秒保存一帧：
-
-```text
-camera stream start 1000
-```
-
-手动读取一帧：
-
-```text
-camera capture
-```
-
-预期结果：
-
-- 终端提示收到 JPEG 图像、字节数和保存路径。
-- 图片保存到 `test/runs/<时间>/camera/`。
-- `latest.jpg` 始终是最近一帧。
-
-### Instruction
-
-执行远端命令：
-
-```text
-instruction shell uname -a
-```
-
-或者：
-
-```text
-instruction run whoami
-```
-
-预期结果：
-
-- Linux 端发送命令到实际设备端。
-- 实际设备端执行命令。
-- Linux 终端显示返回码、stdout 和 stderr。
-- 结果保存到 `test/runs/<时间>/instruction/`。
-
-### File
-
-从头读取远端暴露文件：
-
-```text
-file cat
-```
-
-拉取并保存远端文件快照：
-
-```text
-file pull
-```
-
-追加文本到远端暴露文件：
-
-```text
-file append hello
-```
-
-追加本地文件内容到远端暴露文件：
-
-```text
-file append-file ./local.txt
-```
-
-预期结果：
-
-- `file cat` 在终端显示远端文件内容。
-- `file pull` 保存快照到 `test/runs/<时间>/file/`。
-- `file append ...` 将内容追加到实际设备端暴露的文件。
-
-## 5. 其他命令
-
-查看后台任务：
+进入子页面后只 open 被选择的 `/dev/<name>`。所有子页面支持：
 
 ```text
 status
+close
+open
+reopen
+back
 ```
 
-查看当前设备映射：
+- 进入子页面自动 open。
+- `close`/`open` 可以在当前子页面内重复执行。
+- `back` 自动 close 并返回首页。
+- 离开子页面后没有默认连接继续运行。
+
+现有驱动的 `read()` 是阻塞式的。为避免修改驱动，camera、keyboard、file 的后台读取由 TUI 自己创建的 Linux `fork` 子进程完成；close 时先终止读取子进程，再关闭唯一的字符设备 fd。因此阻塞读取不会妨碍返回首页或再次 open。
+
+## Camera
+
+camera 子页面 open 期间始终持续读取现有 adapter 的 `4 字节长度 + JPEG` 帧，不提供停止接收的 stream 命令。每一帧都会：
+
+1. 完整读出协议帧；
+2. 计算本地 SHA-256；
+3. 写入临时文件并 `fsync`；
+4. 原子发布为最终 `.jpg` 和 `latest.jpg`；
+5. 写入 `frames.jsonl`。
 
 ```text
-devices
+capture [OUTPUT.jpg]
+latest [OUTPUT.jpg]
 ```
 
-查看日志目录：
+保存目录：
 
 ```text
-logdir
+test/runs/<时间>/camera/<连接名>/
 ```
 
-退出：
+## Keyboard
+
+keyboard 页面同时支持现有 adapter 的两个方向：
 
 ```text
-quit
+type hello
+tap enter
+press ctrl
+release ctrl
+mode
+listen text
+listen events
 ```
 
-## 6. 常见问题
+设备端物理按键事件会持续写入 `events.jsonl`；Linux 端输入命令按原有 JSON framing 写入字符设备。
 
-如果 TUI 打开 `/dev/ncd_*` 失败，先检查：
+现有 keyboard adapter 没有命令 ACK，因此 TUI 只会准确显示“已写入 NCD”，不会宣称目标应用已经收到。目标输入框还必须有焦点，设备端操作系统也必须允许 pynput 注入输入。
+
+## Instruction
+
+```text
+run uname -a
+shell echo hello
+timeout 10000
+```
+
+连接在整个子页面期间保持 open。请求使用 UUID，只有收到现有 instruction adapter 返回的相同 ID、returncode、stdout 和 stderr 后才显示响应。`shell` 仍遵守 adapter 原有的 `allow_shell` 配置。
+
+## File
+
+```text
+cat
+pull [OUTPUT]
+append TEXT
+appendfile PATH
+stat
+reopen
+```
+
+现有 file adapter 会在 open 时和文件发生变化后发送完整快照。TUI 始终接收并保存这些快照：
+
+- `cat`、`pull`、`stat` 使用最近快照；
+- `reopen` 可强制 adapter 重新发送当前文件；
+- `append`/`appendfile` 使用原有 framing 写入，然后等待 adapter 回传的新快照；只有新快照末尾与 payload 一致时才显示“由回传快照确认”。
+
+该确认表示 payload 已被实际 adapter 写入并能被它重新读出。由于原 adapter 只有 `flush()`、没有应用层 ACK 或 `fsync()`，TUI 不会把它描述为远端持久化 ACK。
+
+## 测试
 
 ```bash
-ls -l /dev/ncd_*
+python3 -m unittest discover -s test -p 'test_*.py' -v
 ```
 
-如果设备不存在，说明 `ncdd` 没有正常启动或配置文件有误。
-
-如果提示权限不足，用 `sudo` 启动 TUI。
-
-如果 camera 没有图片，确认实际设备端已经选择 camera，并且对应端口和 Linux 配置一致。
-
-如果 keyboard 没有输入效果，确认实际设备端当前系统允许程序模拟键盘输入，并且焦点在可输入窗口。
+测试覆盖：无默认连接、camera 完整落盘、keyboard 双向现有协议、instruction ID 响应、file 回传快照确认、真实 file/instruction adapter 子进程，以及同一页面内重复 open/close。
