@@ -1,15 +1,14 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::mpsc;
 
-use super::DRIVERS_DIR;
-
+use super::bundle;
 use super::list::get_adapters;
 
 /// Raw device info deserialized from a Python adapter's `list` JSON output.
@@ -21,7 +20,7 @@ pub struct RawDevice {
     pub description: String,
 }
 
-/// Manages a single Python adapter child process, spawned via `uv run`.
+/// Manages a single Python adapter child process.
 pub struct Adapter {
     child: Child,
     stdin: ChildStdin,
@@ -33,7 +32,7 @@ pub struct Adapter {
 pub enum AdapterError {
     #[error("Unknown driver: {0}")]
     UnknownDriver(String),
-    #[error("Failed to spawn uv run: {0}")]
+    #[error("Failed to spawn adapter process: {0}")]
     Spawn(std::io::Error),
     #[error("Adapter I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -43,19 +42,18 @@ pub enum AdapterError {
     Json(#[from] serde_json::Error),
 }
 
-/// Synchronously spawn python adapter to list devices
-pub fn list_devices(adapter_dir: &str, script_path: &Path) -> Result<Vec<RawDevice>, AdapterError> {
-    let output = std::process::Command::new("uv")
-        .arg("run")
-        .arg("--project")
-        .arg(adapter_dir)
-        .arg("python")
-        .arg(script_path)
+/// Synchronously spawn a Python adapter to list available devices.
+pub fn list_devices(
+    adapter_dir: &Path,
+    script_path: &Path,
+) -> Result<Vec<RawDevice>, AdapterError> {
+    let output = bundle::run_python_sync(script_path)
         .arg("list")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .env("PYTHONPATH", adapter_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .output()
-        .map_err(AdapterError::Spawn)?;
+        .map_err(|e| AdapterError::Spawn(e))?;
 
     if !output.status.success() {
         return Err(AdapterError::ListFailed(
@@ -81,18 +79,15 @@ impl Adapter {
             .iter()
             .find(|a| a.name == name)
             .ok_or_else(|| AdapterError::UnknownDriver(name.to_string()))?;
-        let script = PathBuf::from(DRIVERS_DIR).join(&info.path);
+        let script = bundle::drivers_dir().join(&info.path);
 
-        let mut cmd = Command::new("uv");
-        cmd.arg("run")
-            .arg("--project")
-            .arg(DRIVERS_DIR)
-            .arg("python")
-            .arg(&script)
+        let mut cmd = bundle::run_python(&script);
+        cmd.arg(&script)
             .arg("run")
             .arg(device_identifier)
-            .arg(device_name)
-            .stdin(Stdio::piped())
+            .arg(device_name);
+
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         for (key, value) in options {

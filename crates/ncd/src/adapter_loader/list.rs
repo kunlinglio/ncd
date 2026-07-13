@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use super::DRIVERS_DIR;
 use super::adapter;
+use super::bundle;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdapterList {
@@ -40,7 +40,7 @@ pub struct DeviceInfo {
 }
 
 pub fn get_adapters() -> AdapterList {
-    let path = PathBuf::from(DRIVERS_DIR).join("adapter_list.toml");
+    let path = bundle::drivers_dir().join("adapter_list.toml");
     let content = std::fs::read_to_string(&path).expect("Failed to read adapter_list.toml");
     toml::from_str(&content).expect("Failed to parse adapter_list.toml")
 }
@@ -52,8 +52,8 @@ pub fn get_all_devices() -> Vec<DeviceInfo> {
     let mut devices: Vec<DeviceInfo> = Vec::new();
 
     for adapter in &adapters.adapters {
-        let script_path = PathBuf::from(DRIVERS_DIR).join(&adapter.path);
-        match adapter::list_devices(DRIVERS_DIR, &script_path) {
+        let script_path = bundle::drivers_dir().join(&adapter.path);
+        match adapter::list_devices(bundle::drivers_dir(), &script_path) {
             Ok(raw_devices) => {
                 for (i, raw) in raw_devices.into_iter().enumerate() {
                     devices.push(DeviceInfo {
