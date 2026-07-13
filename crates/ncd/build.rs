@@ -53,16 +53,23 @@ fn main() {
     log(format!("Copying Python from {} ...", python_home.display()));
     copy_dir_all(&python_home, &bundle_dir.join("python")).unwrap();
 
-    // 2. Install dependencies with uv
+    // 2. Copy adapters to a staging directory first so `uv pip install` doesn't
+    //    pollute the source tree (which would invalidate the build cache).
+    let adapters_src = manifest_dir.join("adapters");
+    let adapters_staging = out_dir.join("adapters-staging");
+    if adapters_staging.exists() {
+        let _ = std::fs::remove_dir_all(&adapters_staging);
+    }
+    copy_dir_all(&adapters_src, &adapters_staging).unwrap();
+
     let site_packages_dir = bundle_dir.join("site-packages");
-    let adapters_dir = manifest_dir.join("adapters");
     log("Installing python dependencies...");
     let status = Command::new("uv")
         .args(["pip", "install", "--python"])
         .arg(&python_bin)
         .args(["--target"])
         .arg(&site_packages_dir)
-        .arg(&adapters_dir)
+        .arg(&adapters_staging)
         .status()
         .expect("Failed to execute uv");
     assert!(
@@ -70,8 +77,8 @@ fn main() {
         "uv pip install failed — check network connectivity"
     );
 
-    // 3. Copy adapter scripts
-    copy_adapters(&manifest_dir.join("adapters"), &bundle_dir.join("adapters")).unwrap();
+    // 3. Copy adapter scripts (from clean source, not staging)
+    copy_adapters(&adapters_src, &bundle_dir.join("adapters")).unwrap();
 
     // Create deflated zip archive
     let bundle_zip = out_dir.join("bundle.zip");
