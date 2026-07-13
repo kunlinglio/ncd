@@ -5,19 +5,10 @@ use std::process::Command;
 /// Unload the old ncd module, then build and load the new one
 /// from the embedded source archive.
 pub fn load_module() -> bool {
-    // 0. Unload any previous instance
+    // 1. Unload any previous instance
     if module_loaded("ncd") {
         println!("ncdd: unloading old ncd module ...");
         let _ = Command::new("rmmod").arg("ncd").status();
-    }
-
-    // 1. Try modprobe first (driver may have been installed by DKMS)
-    if Command::new("modprobe")
-        .arg("ncd")
-        .status()
-        .is_ok_and(|s| s.success())
-    {
-        return true;
     }
 
     // 2. Extract the bundled driver source to a temp directory
