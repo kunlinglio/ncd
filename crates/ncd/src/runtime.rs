@@ -96,15 +96,20 @@ async fn device_actor(
         };
 
         // Spawn a fresh adapter process for this connection.
-        let adapter = match Adapter::spawn(&driver, &identifier, &device_name, &options).await {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("[{name}] Failed to spawn adapter: {e}");
-                let _ = libncd_runtime::close(conn).await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
+        let mut adapter_options = options.clone();
+        adapter_options
+            .entry("port".to_string())
+            .or_insert_with(|| port.to_string());
+        let adapter =
+            match Adapter::spawn(&driver, &identifier, &device_name, &adapter_options).await {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("[{name}] Failed to spawn adapter: {e}");
+                    let _ = libncd_runtime::close(conn).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
         // Bridge data until the connection or adapter closes.
         handle_connection(conn, adapter, &name).await;
@@ -169,18 +174,26 @@ async fn handle_connection(mut conn: ConnHandler, mut adapter: Adapter, name: &s
         }
     }
 
-    // Cleanup.
-    let _ = adapter.kill().await;
     match libncd_runtime::close(conn).await {
         Ok(Ok(remaining)) => {
             if !remaining.is_empty() {
                 eprintln!(
-                    "[{name}] {} unread messages discarded on close",
+                    "[{name}] {} unread messages delivered on close",
                     remaining.len()
                 );
+                for data in remaining {
+                    if let Err(e) = adapter.write(&data).await {
+                        eprintln!("[{name}] Write remaining data to adapter failed: {e}");
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         Ok(Err(e)) => eprintln!("[{name}] Close error: {e}"),
         Err(e) => eprintln!("[{name}] Close error: {e}"),
     }
+
+    // Cleanup.
+    let _ = adapter.kill().await;
 }

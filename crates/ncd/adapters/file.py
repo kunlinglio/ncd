@@ -24,9 +24,10 @@ class FileAdapter(Adapter):
     def _pack_payload(payload: bytes) -> bytes:
         return struct.pack("!I", len(payload)) + payload
 
-    def _log(self, message: str):
+    def _log(self, direction: str, message: str = ""):
+        suffix = f" {message}" if message else ""
         print(
-            f"[file adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            f"[{self.device_name}:{getattr(self, 'port', '?')} {direction}]{suffix}",
             file=sys.stderr,
             flush=True,
         )
@@ -42,7 +43,8 @@ class FileAdapter(Adapter):
         ]
 
     def open(self, options: dict[str, str]):
-        self._log(f"open requested options={options}")
+        self.port = options.get("port", "?")
+        self._log("connect", "open")
         self.file_path = options.get("file_path")
         if not self.file_path:
             raise ValueError("file_path option is required for FileAdapter")
@@ -57,7 +59,7 @@ class FileAdapter(Adapter):
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
         self.file = open(self.file_path, "a+b")
-        self._log(f"opened path={self.file_path} poll_interval={self.poll_interval}s")
+        self._log("connect", "opened")
 
     def read(self) -> bytes:
         while True:
@@ -69,13 +71,13 @@ class FileAdapter(Adapter):
 
             if signature != self.last_signature:
                 self.last_signature = signature
-                self._log(f"[actual->linux] read snapshot bytes={len(data)} signature={signature}")
+                self._log("device->linux", f"snapshot={len(data)} bytes")
                 return self._pack_payload(data)
 
             time.sleep(self.poll_interval)
 
     def write(self, data: bytes):
-        self._log(f"[linux->actual] write bytes={len(data)}")
+        self._log("linux->device", f"bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -93,9 +95,7 @@ class FileAdapter(Adapter):
             self.file.seek(0, os.SEEK_END)
             self.file.write(data)
             self.file.flush()
-            stat = os.fstat(self.file.fileno())
-            signature = (stat.st_mtime_ns, stat.st_size)
-            self._log(f"[linux->actual] file appended bytes={len(data)} signature={signature}")
+            self._log("linux->device", f"append={len(data)} bytes")
 
     def close(self):
         file = getattr(self, "file", None)

@@ -10,9 +10,10 @@ import sys
 
 
 class InstructionAdapter(Adapter):
-    def _log(self, message: str):
+    def _log(self, direction: str, message: str = ""):
+        suffix = f" {message}" if message else ""
         print(
-            f"[instruction adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            f"[{self.device_name}:{getattr(self, 'port', '?')} {direction}]{suffix}",
             file=sys.stderr,
             flush=True,
         )
@@ -29,28 +30,26 @@ class InstructionAdapter(Adapter):
         ]
 
     def open(self, options: dict[str, str]):
+        self.port = options.get("port", "?")
         self.timeout_ms = int(options.get("timeout_ms") or "5000")
         self.cwd = options.get("cwd") or None
         self.allow_shell = options.get("allow_shell", "false").lower() == "true"
         self.encoding = options.get("encoding") or locale.getpreferredencoding(False)
         self.responses = queue.Queue()
         self.input_buffer = b""
-        self._log(
-            f"open timeout_ms={self.timeout_ms} cwd={self.cwd} "
-            f"allow_shell={self.allow_shell} encoding={self.encoding}"
-        )
+        self._log("connect", "open")
 
     def read(self) -> bytes:
         response = self.responses.get()
         payload = json.dumps(response).encode("utf-8")
         self._log(
-            f"[actual->linux] read response id={response.get('id')} "
-            f"returncode={response.get('returncode')} payload={len(payload)} bytes"
+            "device->linux",
+            f"returncode={response.get('returncode')} bytes={len(payload)}",
         )
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
-        self._log(f"[linux->actual] write bytes={len(data)}")
+        self._log("linux->device", f"bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -64,7 +63,7 @@ class InstructionAdapter(Adapter):
 
             request = json.loads(payload.decode("utf-8"))
             request_id = request.get("id")
-            self._log(f"[linux->actual] execute request id={request_id} request={request}")
+            self._log("linux->device", self._summarize_request(request))
 
             try:
                 shell = bool(request.get("shell", False))
@@ -108,11 +107,23 @@ class InstructionAdapter(Adapter):
                 }
 
             self._log(
-                f"request finished id={request_id} "
-                f"returncode={response.get('returncode')} ok={response.get('ok')}"
+                "device->linux",
+                f"finished returncode={response.get('returncode')} ok={response.get('ok')}",
             )
             self.responses.put(response)
 
     def close(self):
         self._log("close")
         return
+
+    def _summarize_request(self, request: dict) -> str:
+        if request.get("shell"):
+            command = request.get("command", "")
+            if len(command) > 40:
+                command = command[:40] + "..."
+            return f"shell {command!r}"
+
+        argv = request.get("argv") or []
+        if argv:
+            return f"argv {argv[0]!r} argc={len(argv)}"
+        return "request"

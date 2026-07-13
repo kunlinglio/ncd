@@ -971,7 +971,6 @@ dependencies = [
  "libc",
  "libncd-runtime",
  "serde",
- "serde_json",
  "tar",
  "tempfile",
  "tokio",

@@ -90,7 +90,11 @@ class Adapter(ABC):
         """Read data from the input and write it to the device."""
         try:
             while True:
-                data = input.read(4096)
+                data = (
+                    input.read1(4096)
+                    if hasattr(input, "read1")
+                    else input.read(4096)
+                )
                 if not data:
                     break
                 self.write(data)

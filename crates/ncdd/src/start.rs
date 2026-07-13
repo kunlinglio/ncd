@@ -1,6 +1,5 @@
 use crate::config::{self};
 use crate::device::{Device, DeviceOperationError};
-use crate::device_parser::DeviceParser;
 use crate::netlink::NetlinkSocket;
 use crate::netlink::{
     NCD_MSG_CLOSE_REQ, NCD_MSG_DATA, NCD_MSG_KFIFO_AVAILABLE, NCD_MSG_KFIFO_FULL, NCD_MSG_OPEN_REQ,
@@ -45,7 +44,6 @@ pub async fn run() -> ! {
     let mut inflight = Vec::new(); // bytes sent since the last low-watermark notification
     let mut read_paused = Vec::new(); // whether the TCP actor is currently paused
     let mut pending = Vec::new(); // queue of chunks waiting to be sent to the kernel
-    let mut parsers = Vec::new(); // side-channel parsers; never modify forwarded bytes
     for (minor, cfg) in device_configs.iter().enumerate() {
         if let Err(e) = netlink_socket
             .create_device(minor as u8, cfg.name.as_str())
@@ -64,7 +62,6 @@ pub async fn run() -> ! {
         inflight.push(0usize);
         read_paused.push(false);
         pending.push(VecDeque::<Vec<u8>>::new());
-        parsers.push(DeviceParser::new(minor as u8, &cfg.name, cfg.remote_port));
     }
 
     // 1.5 create channel for actor tasks to send received TCP data back to main loop
@@ -107,9 +104,7 @@ pub async fn run() -> ! {
                     }
                     NCD_MSG_DATA => {
                         let minor = payload[0] as usize;
-                        let data = &payload[1..];
-                        parsers[minor].inspect_linux_to_remote(data);
-                        if let Err(e) = devices[minor].write(data.to_vec()) {
+                        if let Err(e) = devices[minor].write(payload[1..].to_vec()) {
                             eprintln!("Device {} write error: {:?}", devices[minor].name, e);
                         }
                     }
@@ -161,7 +156,6 @@ pub async fn run() -> ! {
             // TCP actor → main loop  (shard then send, or buffer if paused)
             Some((minor, data)) = tcp_rx.recv() => {
                 let minor = minor as usize;
-                parsers[minor].inspect_remote_to_linux(&data);
                 queue_shards(&mut pending[minor], data);
                 flush_device(
                     &netlink_socket,

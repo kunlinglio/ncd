@@ -19,9 +19,10 @@ def get_os_platform() -> tuple[int, str]:
     raise RuntimeError(f"Unsupported platform: {system}")
 
 class CameraAdapter(Adapter):
-    def _log(self, message: str):
+    def _log(self, direction: str, message: str = ""):
+        suffix = f" {message}" if message else ""
         print(
-            f"[camera adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            f"[{self.device_name}:{getattr(self, 'port', '?')} {direction}]{suffix}",
             file=sys.stderr,
             flush=True,
         )
@@ -57,14 +58,15 @@ class CameraAdapter(Adapter):
     def open(self, options: dict[str, str]):
         os, _ = get_os_platform()
         index = int(self.device_identifier)
+        self.port = options.get("port", "?")
 
-        self._log(f"open requested options={options}")
+        self._log("connect", "open")
         self.capture = cv2.VideoCapture(index, os)
 
         if not self.capture.isOpened():
             self.capture.release()
             self.capture = None
-            self._log("open failed")
+            self._log("connect", "open failed")
             raise RuntimeError(f"failed to open camera {index}")
 
         width = options.get("width")
@@ -83,10 +85,7 @@ class CameraAdapter(Adapter):
         self.fps = self.capture.get(cv2.CAP_PROP_FPS)
 
         self.jpeg_quality = int(options.get("jpeg_quality") or "80")
-        self._log(
-            f"opened width={self.width} height={self.height} "
-            f"fps={self.fps} jpeg_quality={self.jpeg_quality}"
-        )
+        self._log("connect", f"opened {self.width}x{self.height}")
 
     def read(self) -> bytes:
         if self.capture is None:
@@ -106,11 +105,11 @@ class CameraAdapter(Adapter):
             raise RuntimeError("failed to encode camera frame")
 
         payload = encoded.tobytes()
-        self._log(f"[actual->linux] read frame jpeg={len(payload)} bytes")
+        self._log("device->linux", f"jpeg={len(payload)} bytes")
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
-        self._log(f"[linux->actual] write rejected bytes={len(data)}")
+        self._log("linux->device", f"rejected bytes={len(data)}")
         raise io.UnsupportedOperation("Can not write to the device: camera is read-only")
     
     def close(self):

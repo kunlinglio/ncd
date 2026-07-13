@@ -7,9 +7,10 @@ import sys
 
 
 class KeyboardAdapter(Adapter):
-    def _log(self, message: str):
+    def _log(self, direction: str, message: str = ""):
+        suffix = f" {message}" if message else ""
         print(
-            f"[keyboard adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            f"[{self.device_name}:{getattr(self, 'port', '?')} {direction}]{suffix}",
             file=sys.stderr,
             flush=True,
         )
@@ -27,7 +28,8 @@ class KeyboardAdapter(Adapter):
     def open(self, options: dict[str, str]):
         from pynput import keyboard
 
-        self._log(f"open requested options={options}")
+        self.port = options.get("port", "?")
+        self._log("connect", "open")
         self.keyboard = keyboard
         self.events = queue.Queue()
         self.input_buffer = b""
@@ -41,9 +43,9 @@ class KeyboardAdapter(Adapter):
 
         if inject:
             self.controller = keyboard.Controller()
-            self._log("keyboard injection enabled")
+            self._log("connect", "keyboard injection enabled")
         else:
-            self._log("keyboard injection disabled")
+            self._log("connect", "keyboard injection disabled")
 
         def serialize_key(key):
             if isinstance(key, keyboard.KeyCode):
@@ -68,7 +70,7 @@ class KeyboardAdapter(Adapter):
                 "event": "press",
                 **serialize_key(key),
             }
-            self._log(f"[actual->linux] local key press {event}")
+            self._log("device->linux", f"press {event.get('key')!r}")
             self.events.put(event)
 
         def on_release(key, injected=False):
@@ -79,7 +81,7 @@ class KeyboardAdapter(Adapter):
                 "event": "release",
                 **serialize_key(key),
             }
-            self._log(f"[actual->linux] local key release {event}")
+            self._log("device->linux", f"release {event.get('key')!r}")
             self.events.put(event)
 
         if listen:
@@ -89,18 +91,18 @@ class KeyboardAdapter(Adapter):
                 suppress=suppress,
             )
             self.listener.start()
-            self._log(f"keyboard listener started suppress={suppress}")
+            self._log("connect", f"keyboard listener started suppress={suppress}")
         else:
-            self._log("keyboard listener disabled")
+            self._log("connect", "keyboard listener disabled")
 
     def read(self) -> bytes:
         event = self.events.get()
         payload = json.dumps(event).encode("utf-8")
-        self._log(f"[actual->linux] read event payload={len(payload)} bytes event={event}")
+        self._log("device->linux", f"event bytes={len(payload)}")
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
-        self._log(f"[linux->actual] write bytes={len(data)}")
+        self._log("linux->device", f"bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -114,7 +116,7 @@ class KeyboardAdapter(Adapter):
 
             command = json.loads(payload.decode("utf-8"))
             action = command["action"]
-            self._log(f"[linux->actual] execute command {command}")
+            self._log("linux->device", self._summarize_command(command))
 
             if self.controller is None:
                 raise RuntimeError("keyboard injection is disabled")
@@ -147,9 +149,21 @@ class KeyboardAdapter(Adapter):
 
     def close(self):
         if self.listener is not None:
-            self._log("keyboard listener stopping")
+            self._log("close", "keyboard listener stopping")
             self.listener.stop()
             self.listener = None
 
         self.controller = None
         self._log("close")
+
+    def _summarize_command(self, command: dict) -> str:
+        action = command.get("action")
+        if action == "type":
+            text = command.get("text", "")
+            if len(text) > 40:
+                text = text[:40] + "..."
+            return f"type {text!r}"
+
+        key = command.get("key")
+        key_type = command.get("key_type", "char")
+        return f"{action} {key_type}:{key}"
