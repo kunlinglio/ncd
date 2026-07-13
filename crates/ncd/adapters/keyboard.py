@@ -8,7 +8,11 @@ import sys
 
 class KeyboardAdapter(Adapter):
     def _log(self, message: str):
-        print(f"[keyboard adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+        print(
+            f"[keyboard adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     @classmethod
     def list_devices(cls) -> list[Device]:
@@ -64,7 +68,7 @@ class KeyboardAdapter(Adapter):
                 "event": "press",
                 **serialize_key(key),
             }
-            self._log(f"local key press {event}")
+            self._log(f"[actual->linux] local key press {event}")
             self.events.put(event)
 
         def on_release(key, injected=False):
@@ -75,7 +79,7 @@ class KeyboardAdapter(Adapter):
                 "event": "release",
                 **serialize_key(key),
             }
-            self._log(f"local key release {event}")
+            self._log(f"[actual->linux] local key release {event}")
             self.events.put(event)
 
         if listen:
@@ -92,11 +96,11 @@ class KeyboardAdapter(Adapter):
     def read(self) -> bytes:
         event = self.events.get()
         payload = json.dumps(event).encode("utf-8")
-        self._log(f"read event payload={len(payload)} bytes event={event}")
+        self._log(f"[actual->linux] read event payload={len(payload)} bytes event={event}")
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
-        self._log(f"write bytes={len(data)}")
+        self._log(f"[linux->actual] write bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -110,7 +114,7 @@ class KeyboardAdapter(Adapter):
 
             command = json.loads(payload.decode("utf-8"))
             action = command["action"]
-            self._log(f"execute command {command}")
+            self._log(f"[linux->actual] execute command {command}")
 
             if self.controller is None:
                 raise RuntimeError("keyboard injection is disabled")

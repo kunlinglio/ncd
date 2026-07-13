@@ -26,8 +26,20 @@ impl Direction {
     }
 }
 
+impl DeviceKind {
+    fn label(self) -> &'static str {
+        match self {
+            DeviceKind::Camera => "camera",
+            DeviceKind::Keyboard => "keyboard",
+            DeviceKind::Instruction => "instruction",
+            DeviceKind::File => "file",
+            DeviceKind::Unknown => "unknown",
+        }
+    }
+}
+
 pub struct DeviceParser {
-    name: String,
+    label: String,
     kind: DeviceKind,
     remote_to_linux: Vec<u8>,
     linux_to_remote: Vec<u8>,
@@ -36,10 +48,17 @@ pub struct DeviceParser {
 }
 
 impl DeviceParser {
-    pub fn new(name: &str, remote_port: u16) -> Self {
+    pub fn new(minor: u8, name: &str, remote_port: u16) -> Self {
+        let kind = infer_device_kind(name, remote_port);
         Self {
-            name: name.to_string(),
-            kind: infer_device_kind(name, remote_port),
+            label: format!(
+                "kind={} device={} minor={} port={}",
+                kind.label(),
+                name,
+                minor,
+                remote_port
+            ),
+            kind,
             remote_to_linux: Vec::new(),
             linux_to_remote: Vec::new(),
             remote_frame_count: 0,
@@ -51,10 +70,10 @@ impl DeviceParser {
         if self.kind == DeviceKind::Unknown {
             return;
         }
-        let name = self.name.clone();
+        let label = self.label.clone();
         let kind = self.kind;
         inspect_stream(
-            &name,
+            &label,
             kind,
             Direction::RemoteToLinux,
             &mut self.remote_to_linux,
@@ -67,10 +86,10 @@ impl DeviceParser {
         if self.kind == DeviceKind::Unknown {
             return;
         }
-        let name = self.name.clone();
+        let label = self.label.clone();
         let kind = self.kind;
         inspect_stream(
-            &name,
+            &label,
             kind,
             Direction::LinuxToRemote,
             &mut self.linux_to_remote,
@@ -97,7 +116,7 @@ fn infer_device_kind(name: &str, remote_port: u16) -> DeviceKind {
 }
 
 fn inspect_stream(
-    name: &str,
+    device_label: &str,
     kind: DeviceKind,
     direction: Direction,
     buffer: &mut Vec<u8>,
@@ -119,8 +138,8 @@ fn inspect_stream(
         if payload_len > MAX_ADAPTER_FRAME_SIZE {
             eprintln!(
                 "[ncdd parse][{}][{}] invalid adapter frame length {}; parser buffer cleared",
-                name,
                 direction.label(),
+                device_label,
                 payload_len
             );
             buffer.clear();
@@ -135,20 +154,30 @@ fn inspect_stream(
         let payload = buffer[4..frame_len].to_vec();
         buffer.drain(..frame_len);
         *frame_count += 1;
-        log_frame(name, kind, direction, *frame_count, &payload);
+        log_frame(device_label, kind, direction, *frame_count, &payload);
     }
 }
 
-fn log_frame(name: &str, kind: DeviceKind, direction: Direction, count: u64, payload: &[u8]) {
+fn log_frame(
+    device_label: &str,
+    kind: DeviceKind,
+    direction: Direction,
+    count: u64,
+    payload: &[u8],
+) {
     match kind {
-        DeviceKind::Camera => log_camera(name, direction, count, payload),
-        DeviceKind::Keyboard => log_json_device("keyboard", name, direction, count, payload),
-        DeviceKind::Instruction => log_json_device("instruction", name, direction, count, payload),
+        DeviceKind::Camera => log_camera(device_label, direction, count, payload),
+        DeviceKind::Keyboard => {
+            log_json_device("keyboard", device_label, direction, count, payload)
+        }
+        DeviceKind::Instruction => {
+            log_json_device("instruction", device_label, direction, count, payload)
+        }
         DeviceKind::File => {
             eprintln!(
                 "[ncdd parse][file][{}][{}] frame={} payload={} bytes",
-                name,
                 direction.label(),
+                device_label,
                 count,
                 payload.len()
             );
@@ -157,36 +186,42 @@ fn log_frame(name: &str, kind: DeviceKind, direction: Direction, count: u64, pay
     }
 }
 
-fn log_camera(name: &str, direction: Direction, count: u64, payload: &[u8]) {
+fn log_camera(device_label: &str, direction: Direction, count: u64, payload: &[u8]) {
     let dimensions = jpeg_dimensions(payload)
         .map(|(width, height)| format!("{width}x{height}"))
         .unwrap_or_else(|| "unknown-size".to_string());
 
     eprintln!(
         "[ncdd parse][camera][{}][{}] frame={} jpeg={} bytes size={}",
-        name,
         direction.label(),
+        device_label,
         count,
         payload.len(),
         dimensions
     );
 }
 
-fn log_json_device(label: &str, name: &str, direction: Direction, count: u64, payload: &[u8]) {
+fn log_json_device(
+    kind_label: &str,
+    device_label: &str,
+    direction: Direction,
+    count: u64,
+    payload: &[u8],
+) {
     match serde_json::from_slice::<Value>(payload) {
         Ok(value) => {
-            if label == "keyboard" {
-                log_keyboard_json(name, direction, count, payload.len(), &value);
+            if kind_label == "keyboard" {
+                log_keyboard_json(device_label, direction, count, payload.len(), &value);
             } else {
-                log_instruction_json(name, direction, count, payload.len(), &value);
+                log_instruction_json(device_label, direction, count, payload.len(), &value);
             }
         }
         Err(error) => {
             eprintln!(
                 "[ncdd parse][{}][{}][{}] frame={} payload={} bytes json-error={}",
-                label,
-                name,
+                kind_label,
                 direction.label(),
+                device_label,
                 count,
                 payload.len(),
                 error
@@ -196,7 +231,7 @@ fn log_json_device(label: &str, name: &str, direction: Direction, count: u64, pa
 }
 
 fn log_keyboard_json(
-    name: &str,
+    device_label: &str,
     direction: Direction,
     count: u64,
     payload_len: usize,
@@ -213,8 +248,8 @@ fn log_keyboard_json(
 
     eprintln!(
         "[ncdd parse][keyboard][{}][{}] frame={} payload={} bytes event={:?} action={:?} key_type={:?} key={:?} text_len={:?}",
-        name,
         direction.label(),
+        device_label,
         count,
         payload_len,
         event,
@@ -226,7 +261,7 @@ fn log_keyboard_json(
 }
 
 fn log_instruction_json(
-    name: &str,
+    device_label: &str,
     direction: Direction,
     count: u64,
     payload_len: usize,
@@ -249,8 +284,8 @@ fn log_instruction_json(
 
     eprintln!(
         "[ncdd parse][instruction][{}][{}] frame={} payload={} bytes id={:?} shell={:?} command={:?} argv_len={:?} ok={:?} returncode={:?} stdout={} stderr={}",
-        name,
         direction.label(),
+        device_label,
         count,
         payload_len,
         id,

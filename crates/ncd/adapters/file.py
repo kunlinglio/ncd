@@ -25,7 +25,11 @@ class FileAdapter(Adapter):
         return struct.pack("!I", len(payload)) + payload
 
     def _log(self, message: str):
-        print(f"[file adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+        print(
+            f"[file adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     @classmethod
     def list_devices(cls) -> list[Device]:
@@ -65,13 +69,13 @@ class FileAdapter(Adapter):
 
             if signature != self.last_signature:
                 self.last_signature = signature
-                self._log(f"read snapshot bytes={len(data)} signature={signature}")
+                self._log(f"[actual->linux] read snapshot bytes={len(data)} signature={signature}")
                 return self._pack_payload(data)
 
             time.sleep(self.poll_interval)
 
     def write(self, data: bytes):
-        self._log(f"write bytes={len(data)}")
+        self._log(f"[linux->actual] write bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -91,7 +95,7 @@ class FileAdapter(Adapter):
             self.file.flush()
             stat = os.fstat(self.file.fileno())
             signature = (stat.st_mtime_ns, stat.st_size)
-            self._log(f"file appended bytes={len(data)} signature={signature}")
+            self._log(f"[linux->actual] file appended bytes={len(data)} signature={signature}")
 
     def close(self):
         file = getattr(self, "file", None)

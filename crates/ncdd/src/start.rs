@@ -64,7 +64,7 @@ pub async fn run() -> ! {
         inflight.push(0usize);
         read_paused.push(false);
         pending.push(VecDeque::<Vec<u8>>::new());
-        parsers.push(DeviceParser::new(&cfg.name, cfg.remote_port));
+        parsers.push(DeviceParser::new(minor as u8, &cfg.name, cfg.remote_port));
     }
 
     // 1.5 create channel for actor tasks to send received TCP data back to main loop

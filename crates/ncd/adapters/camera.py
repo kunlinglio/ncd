@@ -20,7 +20,11 @@ def get_os_platform() -> tuple[int, str]:
 
 class CameraAdapter(Adapter):
     def _log(self, message: str):
-        print(f"[camera adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+        print(
+            f"[camera adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     @classmethod
     def list_devices(cls) -> list[Device]:
@@ -102,11 +106,11 @@ class CameraAdapter(Adapter):
             raise RuntimeError("failed to encode camera frame")
 
         payload = encoded.tobytes()
-        self._log(f"read frame jpeg={len(payload)} bytes")
+        self._log(f"[actual->linux] read frame jpeg={len(payload)} bytes")
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
-        self._log(f"write rejected bytes={len(data)}")
+        self._log(f"[linux->actual] write rejected bytes={len(data)}")
         raise io.UnsupportedOperation("Can not write to the device: camera is read-only")
     
     def close(self):

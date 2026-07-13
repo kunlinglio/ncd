@@ -11,7 +11,11 @@ import sys
 
 class InstructionAdapter(Adapter):
     def _log(self, message: str):
-        print(f"[instruction adapter:{self.device_identifier}] {message}", file=sys.stderr, flush=True)
+        print(
+            f"[instruction adapter name={self.device_name!r} id={self.device_identifier!r}] {message}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     @classmethod
     def list_devices(cls) -> list[Device]:
@@ -40,13 +44,13 @@ class InstructionAdapter(Adapter):
         response = self.responses.get()
         payload = json.dumps(response).encode("utf-8")
         self._log(
-            f"read response id={response.get('id')} "
+            f"[actual->linux] read response id={response.get('id')} "
             f"returncode={response.get('returncode')} payload={len(payload)} bytes"
         )
         return struct.pack("!I", len(payload)) + payload
 
     def write(self, data: bytes):
-        self._log(f"write bytes={len(data)}")
+        self._log(f"[linux->actual] write bytes={len(data)}")
         self.input_buffer += data
 
         while len(self.input_buffer) >= 4:
@@ -60,7 +64,7 @@ class InstructionAdapter(Adapter):
 
             request = json.loads(payload.decode("utf-8"))
             request_id = request.get("id")
-            self._log(f"execute request id={request_id} request={request}")
+            self._log(f"[linux->actual] execute request id={request_id} request={request}")
 
             try:
                 shell = bool(request.get("shell", False))
