@@ -82,8 +82,7 @@ impl Adapter {
         let script = bundle::drivers_dir().join(&info.path);
 
         let mut cmd = bundle::run_python(&script);
-        cmd.arg(&script)
-            .arg("run")
+        cmd.arg("run")
             .arg(device_identifier)
             .arg(device_name);
 
