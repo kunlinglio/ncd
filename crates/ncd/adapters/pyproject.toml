@@ -1,6 +1,13 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ncd-adapters"
 version = "0.1.0"
 description = "NCD host-side device adapter drivers"
 requires-python = ">=3.13"
 dependencies = []
+
+[tool.setuptools]
+py-modules = ["base", "dummy", "file"]

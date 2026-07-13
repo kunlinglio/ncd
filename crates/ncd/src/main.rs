@@ -25,6 +25,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Initialize the embedded Python runtime bundle before any adapter operations.
+    if let Err(e) = adapter_loader::bundle::init() {
+        eprintln!("ncd: Failed to initialize Python runtime bundle: {e}");
+        std::process::exit(1);
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
