@@ -3,26 +3,26 @@ name = "file"
 path = "file.py"
 default_port = 8000
 description = "Map a host file to a device"
-options = { file_path = "", poll_interval_ms = "200" }
+options = { file_path = "/path/to/file" }
 
 [[adapters]]
 name = "camera"
 path = "camera.py"
 default_port = 9000
 description = "Camera adapter"
-options = { width = "", height = "", fps = "", jpeg_quality = "80" }
+options = { jpeg_quality = "80" }
 
 [[adapters]]
 name = "keyboard"
 path = "keyboard.py"
 default_port = 10000
-description = "Keyboard adapter"
-options = { listen = "true", inject = "true", suppress = "false", echo_injected = "false" }
+description = "Keystroke capture"
+options = {}
 
 [[adapters]]
 name = "instruction"
 path = "instruction.py"
 default_port = 11000
-description = "Grep NCD — filter lines containing ncd from input text"
-options = {}
+description = "Run a command on stdin, configure via options"
+options = { command = "grep ncd" }
 

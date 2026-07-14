@@ -2,17 +2,18 @@ from base import Adapter, Device
 
 import platform
 import queue
+import shlex
 import subprocess
 import sys
 
 
-def _grep_cmd():
+def _make_cmd(command_str):
     if platform.system() == "Windows":
         return [
             "powershell", "-NoProfile", "-Command",
-            "$input | Select-String ncd | ForEach-Object { $_.Line }",
+            f"$input | {command_str}",
         ]
-    return ["grep", "ncd"]
+    return shlex.split(command_str)
 
 
 class InstructionAdapter(Adapter):
@@ -21,14 +22,15 @@ class InstructionAdapter(Adapter):
     def list_devices(cls) -> list[Device]:
         return [
             Device(
-                identifier="grep_ncd",
-                name=f"{platform.system()} Grep NCD",
-                description="Filter lines containing ncd",
+                identifier="instruction",
+                name="Instruction",
+                description="Run a command on stdin, configure via options",
             )
         ]
 
     def open(self, options: dict[str, str]):
-        self.cmd = _grep_cmd()
+        command_str = options.get("command", "grep ncd")
+        self.cmd = _make_cmd(command_str)
         self.responses = queue.Queue()
 
     def read(self) -> bytes:
@@ -42,6 +44,8 @@ class InstructionAdapter(Adapter):
             timeout=30,
         )
         out = result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+        if not out:
+            out = "(no matches)"
         self.responses.put(out)
 
     def close(self):
