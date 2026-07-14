@@ -575,6 +575,8 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
         spin_lock_irqsave(&dev->fifo_lock, flags);
         if (!kfifo_is_empty(&dev->data_fifo))
             break;
+        char resume[1] = {dev->minor};
+        send_to_daemon(resume, 1, NCD_MSG_KFIFO_AVAILABLE);
         spin_unlock_irqrestore(&dev->fifo_lock, flags);
 
         ret = wait_event_interruptible(dev->read_wait_queue, !kfifo_is_empty(&dev->data_fifo));
@@ -599,7 +601,7 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
         used = kfifo_len(&dev->data_fifo);
 
         /* resume daemon when pending backlog is empty and kfifo drops below 20% */
-        if (dev->kfifo_paused && list_empty(&dev->pending_chunks) && used < FIFO_LOW_WATERMARK)
+        if (list_empty(&dev->pending_chunks) && used < FIFO_LOW_WATERMARK)
         {
             dev->kfifo_paused = false;
             should_resume = true;
