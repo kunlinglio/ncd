@@ -23,5 +23,6 @@ options = { listen = "true", inject = "true", suppress = "false", echo_injected 
 name = "instruction"
 path = "instruction.py"
 default_port = 11000
-description = "Run commands on the host system"
-options = { timeout_ms = "5000", cwd = "", allow_shell = "false", encoding = "" }
+description = "Grep NCD — filter lines containing ncd from input text"
+options = {}
+

@@ -136,10 +136,12 @@ async fn handle_connection(mut conn: ConnHandler, mut adapter: Adapter, name: &s
             result = libncd_runtime::read(&mut conn) => {
                 match result {
                     Ok(data) => {
+                        eprintln!("[{name}] DEBUG NCD recv {} bytes", data.len());
                         if let Err(e) = adapter.write(&data).await {
                             eprintln!("[{name}] Write to adapter failed: {e}");
                             break;
                         }
+                        eprintln!("[{name}] DEBUG wrote to adapter stdin");
                     }
                     Err(ConnectionClosed::Normal) => {
                         eprintln!("[{name}] NCD peer disconnected");

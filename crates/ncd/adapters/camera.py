@@ -21,11 +21,6 @@ def get_os_platform() -> tuple[int, str]:
 class CameraAdapter(Adapter):
     def _log(self, direction: str, message: str = ""):
         suffix = f" {message}" if message else ""
-        print(
-            f"[{self.device_name}:{getattr(self, 'port', '?')} {direction}]{suffix}",
-            file=sys.stderr,
-            flush=True,
-        )
 
     @classmethod
     def list_devices(cls) -> list[Device]:
