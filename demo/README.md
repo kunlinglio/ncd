@@ -6,12 +6,12 @@
 Linux TUI <-> /dev/ncd_* <-> driver <-> ncdd <-> 网络 <-> ncd <-> 实际设备 adapter
 ```
 
-本轮没有修改 `ncdd`、driver、NCD 网络协议以及 camera/keyboard/instruction adapter。由于 file adapter 在连接建立前就会因空路径退出，为了让默认配置能够启动，只给 `FileAdapter` 增加了一个空 `file_path` 兜底。
+本轮没有修改 `ncdd`、`libncd-runtime`、Linux 内核 driver、NCD 线上协议、`ncd` 主程序、base/camera/keyboard adapter。camera 只增强 Linux TUI 的逐层接收和保存状态；file/instruction 的现有 adapter 因确有启动、落盘和请求安全问题而进行了必要修复。
 
 ## 启动与选择连接
 
 ```bash
-python3 test/ncd_tui.py
+python3 demo/ncd_tui.py
 ```
 
 首页不会自动打开默认连接。可以输入：
@@ -34,7 +34,7 @@ back
 help
 ```
 
-运行数据位于 `test/runs/<UTC 时间>/`，进入每个子页面时都会显示准确目录。
+运行数据位于 `demo/runs/<UTC 时间>/`，进入每个子页面时都会显示准确目录。
 
 ## Keyboard 命令
 
@@ -96,7 +96,9 @@ camera 页面打开期间会持续读取。每个完整帧都会：
 options = { width = "640", height = "480", fps = "2", jpeg_quality = "60" }
 ```
 
-当前 driver FIFO 为 4 KiB，`read()` 每次最多排出 4 KiB；高分辨率 JPEG 需要很多轮流控才能组成一个完整帧。`wait` 在 30 秒内没有完整帧时会同时提示“可能断线”和“帧过大/吞吐不足”。若降低图片大小后仍然只有一帧，下一步需要采集 Linux 的 `ncdd` 输出、`dmesg` 中的 `kfifo` 日志以及实际设备每帧的 `jpeg=... bytes`，再判断是否必须修改 `ncdd/driver`。
+当前 driver FIFO 为 4 KiB，`read()` 每次最多排出 4 KiB；高分辨率 JPEG 需要很多轮流控才能组成一个完整帧。driver 和 `ncdd` 只处理字节块，不解析 `[长度][JPEG]`，所以 `dmesg` 本来就不会声明“收到一张图片”。同样，一张较大的 JPEG 会产生很多条 `bytes=...` 转发日志，因此“很多字节块”不能单独证明已经传了多张完整图片。
+
+TUI 的 `status` 现在分别显示：`transport_frames`（已读完多少个完整 camera 业务帧）、`saved_frames`（已成功落盘多少帧），以及 `stream_stage`（正在等下一帧 4 字节长度头，或当前 payload 已收/应收字节）。若 `transport_frames` 和 `saved_frames` 同步增长，接收与保存都正常；若 payload 数字停住，TUI 尚未收到完整后续帧；若完整帧数增长但保存数不增长，则检查校验和磁盘错误。`wait` 在 30 秒内没有完整帧时仍会提示可能断线或帧过大。仅有网卡上传占用或内核 FIFO 日志不能代替应用层完整帧证据。
 
 旧命令 `capture` 和 `path` 分别保留为 `wait` 和 `files` 的兼容别名。
 
@@ -115,6 +117,8 @@ reopen                 重新连接并要求一份新的初始快照
 ```
 
 `append`/`push` 都是“追加到末尾”，不是覆盖文件，也不能在命令中选择另一个实际设备路径。只有收到更新后的完整快照，并确认快照末尾与发送内容完全一致时，TUI 才显示成功。`show` 只适合快速预览；二进制或大文件应使用 `save` 获取完整副本。
+
+FileAdapter 现在每次追加都会 `flush + fsync`，不再长期持有文件句柄，并使用 inode/mtime/size 加内容哈希检测变化，因此能识别编辑器的原子替换和同大小改写。轮询间隔限制为 10～60000 ms；单个协议帧和映射文件上限为 64 MiB，超限会明确断开而不是无限增长内存。
 
 旧命令 `read/cat/write/writefile/appendfile/pull` 仍作为兼容别名。
 
@@ -187,6 +191,8 @@ logs                    显示请求、响应、stdout、stderr 日志路径
 
 `run` 发送的是明确的 argv，例如 PowerShell 使用 `powershell.exe ... -Command`，bash 使用 `/bin/bash -lc`，因此不依赖 adapter 的 `allow_shell=true`。每个响应按相同 UUID 匹配，并显示 `device->linux`、退出码、stdout 和 stderr。这里不是持续存在的交互式终端；每次 `run` 都是一次独立命令。
 
+InstructionAdapter 会校验 JSON 对象、argv/command、stdin、cwd 和 timeout，拒绝超过 1 MiB 的请求或 stdin。命令输出先写临时文件，stdout/stderr 各最多回传 4 MiB，超出时返回 `*_truncated=true` 并在 TUI 提示。超时命令会被终止并返回 `timed_out=true` 和明确文字，不再把所有失败笼统显示成 `returncode=None`；只有程序根本未能启动等进程创建错误仍可能没有退出码。
+
 最常用的是 `run`。只有明确知道某个名称是真实可执行文件、并且不需要 PowerShell/cmd/bash 语法时才使用 `exec`。`detect` 解决实际设备系统或终端发生变化的问题；`timeout` 只控制一条命令等待多久；`logs` 用于事后查看完整请求和输出。旧命令 `terminal`、`info` 仍是兼容别名，`win/unix/shell` 保留但不出现在主帮助中。
 
 ## 关于“实际设备控制远端 Linux”的修改方案
@@ -220,7 +226,7 @@ inject-linux on
 inject-linux off
 ```
 
-开启后把事件映射为 Linux evdev key code，通过 `/dev/uinput` 注入当前 Linux 桌面。还要实现：权限/udev 规则、字符与物理键码映射、断线时释放所有按下键、紧急停止热键、禁止默认开启和清晰的安全提示。这个方案主要修改 `test/ncd_tui.py`、依赖与测试；当前 adapter、`ncd`、`ncdd`、driver 和 NCD 协议通常都不用改。
+开启后把事件映射为 Linux evdev key code，通过 `/dev/uinput` 注入当前 Linux 桌面。还要实现：权限/udev 规则、字符与物理键码映射、断线时释放所有按下键、紧急停止热键、禁止默认开启和清晰的安全提示。这个方案主要修改 `demo/ncd_tui.py`、依赖与测试；当前 adapter、`ncd`、`ncdd`、driver 和 NCD 协议通常都不用改。
 
 ### 反向 instruction
 
@@ -268,4 +274,4 @@ mkdir / rename / delete（按需开放）
 python3 -m unittest discover -s test -p 'test_*.py' -v
 ```
 
-测试覆盖主页选择、keyboard 双向事件和非法按键拦截、camera 连续大帧保存、file 显式/默认路径及回传确认、PowerShell/bash 自动检测和输出返回、真实现有 adapters 的子进程回环，以及页面内重复 open/close。
+测试覆盖主页选择、keyboard 双向事件和非法按键拦截、camera 长度头/接收进度、连续大帧保存、file 显式/默认路径、原子替换、超长帧拦截及回传确认、instruction 非法请求、真实超时、输出截断、PowerShell/bash 自动检测和输出返回、真实 adapters 的子进程回环，以及页面内重复 open/close。

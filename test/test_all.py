@@ -17,7 +17,8 @@ from unittest.mock import patch
 
 TEST_DIR = Path(__file__).resolve().parent
 ROOT = TEST_DIR.parent
-sys.path.insert(0, str(TEST_DIR))
+DEMO_DIR = ROOT / "demo"
+sys.path.insert(0, str(DEMO_DIR))
 
 import ncd_tui  # noqa: E402
 
@@ -474,6 +475,73 @@ remote_port = 10000
             self.assertTrue(session.close())
             self.assertTrue(session.open())
             self.assertTrue(session.close())
+
+
+class ActualCameraAdapterTests(unittest.TestCase):
+    def test_camera_adapter_continuously_returns_framed_jpegs_to_simulated_peer(self):
+        adapters = ROOT / "crates" / "ncd" / "adapters"
+        sys.path.insert(0, str(adapters))
+
+        fake_cv2 = types.ModuleType("cv2")
+        fake_cv2.IMWRITE_JPEG_QUALITY = 1
+        payloads = iter(
+            (
+                b"\xff\xd8simulated-camera-frame-1\xff\xd9",
+                b"\xff\xd8simulated-camera-frame-2\xff\xd9",
+            )
+        )
+
+        class Encoded:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def tobytes(self):
+                return self.payload
+
+        fake_cv2.imencode = lambda *_args, **_kwargs: (
+            True,
+            Encoded(next(payloads)),
+        )
+
+        spec = spec_from_file_location(
+            "ncd_camera_adapter_peer_test", adapters / "camera.py"
+        )
+        with patch.dict(sys.modules, {"cv2": fake_cv2}):
+            module = module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+        class Capture:
+            def __init__(self):
+                self.read_count = 0
+                self.released = False
+
+            def read(self):
+                self.read_count += 1
+                return True, object()
+
+            def release(self):
+                self.released = True
+
+        capture = Capture()
+        adapter = module.CameraAdapter("0", "Camera Device", {})
+        adapter.capture = capture
+        adapter.jpeg_quality = 80
+        adapter.port = 9000
+        try:
+            frames = [adapter.read(), adapter.read()]
+            decoded = []
+            for frame in frames:
+                payload_len = struct.unpack("!I", frame[:4])[0]
+                payload = frame[4:]
+                self.assertEqual(payload_len, len(payload))
+                self.assertTrue(payload.startswith(b"\xff\xd8"))
+                self.assertTrue(payload.endswith(b"\xff\xd9"))
+                decoded.append(payload)
+            self.assertEqual(capture.read_count, 2)
+            self.assertNotEqual(decoded[0], decoded[1])
+        finally:
+            adapter.close()
+        self.assertTrue(capture.released)
 
 
 class ActualFileAdapterTests(unittest.TestCase):

@@ -1918,7 +1918,7 @@ info                   show file purpose, hash, time and log paths
             raise RuntimeError(
                 "no initial file snapshot. The device may still be running an older bundled "
                 "FileAdapter that exits when file_path is empty. Rebuild/reinstall device-side "
-                "ncd, or set options.file_path explicitly; see test/README.md."
+                "ncd, or set options.file_path explicitly; see demo/README.md."
             ) from error
 
     def receiver_loop(self, stop_event: Any) -> None:
