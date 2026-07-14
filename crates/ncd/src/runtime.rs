@@ -209,9 +209,8 @@ async fn handle_connection(mut conn: ConnHandler, mut adapter: Adapter, name: &s
     }
 
     // Give the adapter time to process any data written to its stdin
-    // before killing it. Short-lived connections (e.g. short file writes)
-    // are especially sensitive to this — the adapter needs a moment to
-    // flush its output and write to disk.
+    // before killing it.
+    // TODO: This is a bit hacky. We may should replace it with more graceful mechanism.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Cleanup.
