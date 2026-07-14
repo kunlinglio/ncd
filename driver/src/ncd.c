@@ -267,17 +267,20 @@ static void recv_from_daemon(struct sk_buff *skb)
 
             unsigned char minor = data[0];
             if (minor >= NCD_MAX_DEVICES || !ncd_devices[minor] || !ncd_devices[minor]->in_use)
+            {
+                pr_warn("ncd: unknown minor %d, ignoring\n", minor);
                 break;
+            }
 
             if (data[1] == '1')
             {
                 ncd_devices[minor]->conn_status = CONN_SUCCESS;
-                pr_info("ncd: client connected\n");
+                pr_info("ncd: client of device %d connected\n", minor);
             }
             else
             {
                 ncd_devices[minor]->conn_status = CONN_FAILED;
-                pr_err("ncd: client connection failed\n");
+                pr_err("ncd: client of device %d connection failed\n", minor);
             }
 
             /* wake up open wait queue */
@@ -499,10 +502,16 @@ static int ncd_open(struct inode *inode, struct file *filp)
     int ret;
     unsigned long flags;
 
+    if (!dev)
+    {
+        pr_err("ncd: open with NULL dev\n");
+        return -EINVAL;
+    }
+
     /* Ensure exclusive access */
     if (atomic_cmpxchg(&dev->open_count, 0, 1) != 0)
     {
-        pr_err("ncd: device is already opened\n");
+        pr_err("ncd: device %d is already opened\n", dev->minor);
         return -EBUSY;
     }
 
@@ -521,7 +530,7 @@ static int ncd_open(struct inode *inode, struct file *filp)
     ret = send_to_daemon(payload, 1, NCD_MSG_OPEN_REQ);
     if (ret < 0)
     {
-        pr_err("ncd: send OPEN_REQ failed, err=%d\n", ret);
+        pr_err("ncd: device %d send OPEN_REQ failed, err=%d\n", dev->minor, ret);
         atomic_set(&dev->open_count, 0);
         return ret;
     }
@@ -529,7 +538,7 @@ static int ncd_open(struct inode *inode, struct file *filp)
     ret = wait_event_interruptible(dev->conn_wait_queue, dev->conn_status != CONN_WAITING);
     if (ret)
     {
-        pr_info("ncd: open interrupted by signal\n");
+        pr_info("ncd: device %d open interrupted by signal\n", dev->minor);
         dev->conn_status = CONN_WAITING;
         atomic_set(&dev->open_count, 0);
         return -ERESTARTSYS;
@@ -538,12 +547,12 @@ static int ncd_open(struct inode *inode, struct file *filp)
     if (dev->conn_status == CONN_SUCCESS)
     {
         ret = 0;
-        pr_info("ncd: open succeeded\n");
+        pr_info("ncd: device %d open succeeded\n", dev->minor);
     }
     else
     {
         ret = -ECONNREFUSED;
-        pr_err("ncd: open failed, connection refused\n");
+        pr_err("ncd: device %d open failed, connection refused\n", dev->minor);
         atomic_set(&dev->open_count, 0);
     }
     return ret;
@@ -582,7 +591,7 @@ static ssize_t ncd_read(struct file *filp, char __user *buf, size_t count, loff_
         ret = wait_event_interruptible(dev->read_wait_queue, !kfifo_is_empty(&dev->data_fifo));
         if (ret)
         {
-            pr_info("ncd: read interrupted by signal\n");
+            pr_info("ncd: device %d read interrupted by signal\n", dev->minor);
             return -ERESTARTSYS;
         }
     }
@@ -669,11 +678,13 @@ static int ncd_release(struct inode *inode, struct file *filp)
 {
     struct ncd_device *dev = filp->private_data;
     unsigned long flags;
+    unsigned char minor;
 
     if (!dev)
         return 0;
 
-    char payload[1] = {dev->minor};
+    minor = dev->minor;
+    char payload[1] = {minor};
 
     send_to_daemon(payload, 1, NCD_MSG_CLOSE_REQ);
 
@@ -687,7 +698,7 @@ static int ncd_release(struct inode *inode, struct file *filp)
 
     atomic_set(&dev->open_count, 0);
 
-    pr_info("ncd: device released\n");
+    pr_info("ncd: device %d released\n", minor);
     return 0;
 }
 
