@@ -60,7 +60,7 @@ The script should be placed in the `crates/ncd/adapters` directory of the ncd in
 
 After that, you can rebuild and install the ncd host tool to include the new driver. The new driver will be automatically detected and listed when you run `ncd config`.
 
-### ncd demo
+### NCD Demo
 
 We provide a demo method for each device type to showcase ncd's functionality.
 **Prerequisite:** start `ncd` on the Host and `sudo ncdd` on the Linux endpoint first.
@@ -70,12 +70,12 @@ On the **Linux** endpoint, run:
 ```bash
 cat /dev/ncd_keyboard
 ```
-Subsequently, type characters on the host keyborad and press "enter"after which you would be able to see characters sent from the host in its original appearance.
+Subsequently, type characters on the host keyborad and press "enter" after which you would be able to see characters sent from the host in its original appearance.
 
 #### Camera
 On the Linux endpoint, start the MJPEG server:
 ```bash
-python demo/camera_server.py
+python demo/camera_server.py /dev/ncd_camera 8080
 ```
 to start a server on the linux
 Then, open "http://localhost:8080" to view the camera live-stream from the host.
@@ -91,7 +91,7 @@ cat /dev/ncd_file                    # verify it was written
 #### Instruction
 On the Linux endpoint, run the demo instruction:
 ```bash
-    ll | python3 demo/instruction.py
+ll | python3 demo/instruction.py
 ```
 
 ## License
