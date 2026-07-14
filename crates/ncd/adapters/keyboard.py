@@ -31,7 +31,7 @@ class KeyboardAdapter(Adapter):
             Device(
                 identifier="system_keyboard",
                 name="System Keyboard",
-                description="Keystroke capture with modifier support",
+                description="Keystroke capture",
             )
         ]
 

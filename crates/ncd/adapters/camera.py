@@ -56,6 +56,7 @@ class CameraAdapter(Adapter):
         self.port = options.get("port", "?")
 
         self._log("connect", "open")
+
         self.capture = cv2.VideoCapture(index, os)
 
         if not self.capture.isOpened():
@@ -63,17 +64,6 @@ class CameraAdapter(Adapter):
             self.capture = None
             self._log("connect", "open failed")
             raise RuntimeError(f"failed to open camera {index}")
-
-        width = options.get("width")
-        height = options.get("height")
-        fps = options.get("fps")
-
-        if width:
-            self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-        if height:
-            self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-        if fps:
-            self.capture.set(cv2.CAP_PROP_FPS, int(fps))
 
         self.width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
