@@ -135,11 +135,15 @@ impl NetlinkSocket {
     pub async fn recv_from_kernel(&self) -> io::Result<(u16, Vec<u8>)> {
         loop {
             let mut guard = self.fd.readable().await?;
-            match guard.try_io(|_| self.try_recv()) {
-                Ok(Ok(result)) => return Ok(result),
+            let res = match guard.try_io(|_| self.try_recv()) {
+                Ok(Ok(result)) => result,
                 Ok(Err(e)) => return Err(e),
                 Err(_) => continue, // WouldBlock → retry
-            }
+            };
+            let Some(res) = res else {
+                continue;
+            };
+            return Ok(res);
         }
     }
 
@@ -242,7 +246,7 @@ impl NetlinkSocket {
 
     /// Receive a Netlink message via recvmsg(2).
     /// Called inside try_io; must not block.
-    fn try_recv(&self) -> io::Result<(u16, Vec<u8>)> {
+    fn try_recv(&self) -> io::Result<Option<(u16, Vec<u8>)>> {
         let raw_fd = self.fd.get_ref().as_raw_fd();
 
         let mut buf = vec![0u8; RECV_BUF_SIZE];
@@ -288,12 +292,13 @@ impl NetlinkSocket {
         }
         let payload_len = nlh.nlmsg_len as usize - NLMSG_HDRLEN;
 
-        let payload = if payload_len > 0 && recv_len >= NLMSG_HDRLEN + payload_len {
+        assert!(payload_len > 0);
+        let payload = if recv_len >= NLMSG_HDRLEN + payload_len {
             buf[NLMSG_HDRLEN..NLMSG_HDRLEN + payload_len].to_vec()
         } else {
-            Vec::new()
+            return Ok(None);
         };
 
-        Ok((nlh.nlmsg_type, payload))
+        Ok(Some((nlh.nlmsg_type, payload)))
     }
 }
