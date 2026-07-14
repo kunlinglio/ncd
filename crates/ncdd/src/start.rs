@@ -104,6 +104,7 @@ pub async fn run() -> ! {
                     }
                     NCD_MSG_DATA => {
                         let minor = payload[0] as usize;
+                        println!("Device {} received {} bytes from kernel", devices[minor].name, payload.len() - 1);
                         if let Err(e) = devices[minor].write(payload[1..].to_vec()) {
                             eprintln!("Device {} write error: {:?}", devices[minor].name, e);
                         }

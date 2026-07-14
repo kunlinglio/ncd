@@ -128,7 +128,8 @@ async fn connection_run(
             cmd = write_rx.recv() => {
                 match cmd {
                     Some(WriteCommand::Data(data)) => {
-                        if libncd_runtime::write(&mut conn, data).await.is_err() {
+                        if let Err(e) = libncd_runtime::write(&mut conn, data).await {
+                            eprintln!("Device {} write error: {:?}", minor, e);
                             break;
                         }
                     }
