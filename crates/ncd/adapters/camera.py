@@ -1,12 +1,12 @@
+import io
+import platform
+import struct
+
+import cv2
 from base import Adapter, Device
 
-import platform
-import cv2
-import io
-import struct
-import sys
-
 MAX_CAMERA_NUM = 4
+
 
 def get_os_platform() -> tuple[int, str]:
     system = platform.system()
@@ -17,6 +17,7 @@ def get_os_platform() -> tuple[int, str]:
     if system == "Windows":
         return cv2.CAP_MSMF, "Media Foundation"
     raise RuntimeError(f"Unsupported platform: {system}")
+
 
 class CameraAdapter(Adapter):
     def _log(self, direction: str, message: str = ""):
@@ -40,16 +41,18 @@ class CameraAdapter(Adapter):
 
                 height, width = frame.shape[:2]
 
-                devices.append(Device(
-                    identifier=str(i),
-                    name=f"Camera {i}",
-                    description=f"frame-height: {height}, frame-width: {width}, platform: {backend_name}",
-                ))
+                devices.append(
+                    Device(
+                        identifier=str(i),
+                        name=f"Camera {i}",
+                        description="Camera device",
+                    )
+                )
             finally:
                 capture.release()
 
         return devices
-    
+
     def open(self, options: dict[str, str]):
         os, _ = get_os_platform()
         index = int(self.device_identifier)
@@ -95,8 +98,10 @@ class CameraAdapter(Adapter):
 
     def write(self, data: bytes):
         self._log("linux->device", f"rejected bytes={len(data)}")
-        raise io.UnsupportedOperation("Can not write to the device: camera is read-only")
-    
+        raise io.UnsupportedOperation(
+            "Can not write to the device: camera is read-only"
+        )
+
     def close(self):
         if self.capture is not None:
             self._log("close")

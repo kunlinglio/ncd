@@ -35,7 +35,7 @@ struct SockAddrNl {
 }
 
 const NLMSG_HDRLEN: usize = 16; // mem::size_of::<NlMsgHdr>()
-const RECV_BUF_SIZE: usize = 4096;
+const RECV_BUF_SIZE: usize = 4096 * 1024; // 4 MiB
 fn nlmsg_align(len: usize) -> usize {
     (len + 3) & !3
 } // align to 4 bytes

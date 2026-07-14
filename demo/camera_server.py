@@ -2,22 +2,21 @@
 Usage:  python3 camera_server.py [/dev/ncd_camera] [port]
 Open:   http://<linux-ip>:8080
 """
+
 import os
 import struct
 import sys
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 DEVICE = sys.argv[1] if len(sys.argv) > 1 else "/dev/ncd_camera"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
 
 latest_frame = b""
-_frame_version = 0
-_condition = threading.Condition()
+lock = threading.Lock()
 
 
 class MJPEGHandler(BaseHTTPRequestHandler):
-
     def do_GET(self):
         if self.path == "/":
             self._send_page()
@@ -25,7 +24,7 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             self._send_stream()
 
     def _send_page(self):
-        html = f"""<!DOCTYPE html>
+        html = """<!DOCTYPE html>
 <html><head><title>NCD Camera</title></head>
 <body style="margin:0;background:#000;display:flex;justify-content:center;">
   <img src="/stream" style="max-width:100vw;max-height:100vh">
@@ -37,22 +36,17 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 
     def _send_stream(self):
         self.send_response(200)
-        self.send_header("Content-Type",
-                         "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
-        last_version = -1
         while True:
-            with _condition:
-                # Wait until a new frame arrives (reader thread notifies us)
-                while _frame_version == last_version:
-                    _condition.wait()
+            with lock:
                 frame = latest_frame
-                last_version = _frame_version
             if frame:
                 self.wfile.write(b"--frame\r\n")
                 self.wfile.write(b"Content-Type: image/jpeg\r\n\r\n")
                 self.wfile.write(frame)
                 self.wfile.write(b"\r\n")
+                # flush each frame so the browser renders in real time
                 try:
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
@@ -63,7 +57,7 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 
 
 def reader():
-    global latest_frame, _frame_version
+    global latest_frame
     fd = os.open(DEVICE, os.O_RDONLY)
     while True:
         raw = os.read(fd, 4)
@@ -74,10 +68,8 @@ def reader():
             if not chunk:
                 break
             jpg += chunk
-        with _condition:
+        with lock:
             latest_frame = jpg
-            _frame_version += 1
-            _condition.notify_all()
 
 
 threading.Thread(target=reader, daemon=True).start()
