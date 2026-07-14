@@ -2,49 +2,47 @@ from base import Adapter, Device
 
 import platform
 import queue
-import struct
 import subprocess
 import sys
 
 
-def _grep_command():
-    system = platform.system()
-    if system == "Windows":
-        return ["powershell", "-Command", "$input | Select-String ncd"]
-    else:
-        return ["grep", "ncd"]
+def _grep_cmd():
+    if platform.system() == "Windows":
+        return [
+            "powershell", "-NoProfile", "-Command",
+            "$input | Select-String ncd | ForEach-Object { $_.Line }",
+        ]
+    return ["grep", "ncd"]
 
 
 class InstructionAdapter(Adapter):
 
     @classmethod
     def list_devices(cls) -> list[Device]:
-        system = platform.system()
         return [
             Device(
                 identifier="grep_ncd",
-                name=f"{system} Grep NCD",
-                description="Filter lines containing ncd from stdin",
+                name=f"{platform.system()} Grep NCD",
+                description="Filter lines containing ncd",
             )
         ]
 
     def open(self, options: dict[str, str]):
-        self.command = _grep_command()
+        self.cmd = _grep_cmd()
         self.responses = queue.Queue()
 
     def read(self) -> bytes:
-        payload = self.responses.get().encode("utf-8")
-        return struct.pack("!I", len(payload)) + payload
+        return self.responses.get().encode("utf-8")
 
     def write(self, data: bytes):
         result = subprocess.run(
-            self.command,
+            self.cmd,
             input=data,
             capture_output=True,
             timeout=30,
         )
-        output = result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n")
-        self.responses.put(output)
+        out = result.stdout.decode("utf-8", errors="replace").replace("\r\n", "\n").strip()
+        self.responses.put(out)
 
     def close(self):
         pass

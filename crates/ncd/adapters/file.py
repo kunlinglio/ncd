@@ -1,5 +1,4 @@
 import os
-import struct
 import sys
 import threading
 import time
@@ -8,8 +7,6 @@ from base import Adapter, Device
 
 
 class FileAdapter(Adapter):
-
-    DEFAULT_FILE_PATH = "~/ncd-share.bin"
 
     @staticmethod
     def _normalize_path(path: str) -> str:
@@ -24,16 +21,17 @@ class FileAdapter(Adapter):
             Device(
                 identifier="file_device",
                 name="File Device",
-                description="Cursor-based read/write (overwrite mode)",
+                description="Cursor-based read/write, raw bytes, no framing",
             )
         ]
 
     def open(self, options: dict[str, str]):
-        path = options.get("file_path") or self.DEFAULT_FILE_PATH
+        path = options.get("file_path", "").strip()
+        if not path:
+            raise ValueError("file_path is required")
         self.file_path = self._normalize_path(path)
-        parent = os.path.dirname(self.file_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        if not os.path.isfile(self.file_path):
+            raise FileNotFoundError(f"file not found: {self.file_path}")
         self.file = open(self.file_path, "r+b")
         self.cursor = 0
         self.lock = threading.Lock()

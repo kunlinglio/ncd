@@ -95,10 +95,8 @@ class Adapter(ABC):
                     if hasattr(input, "read1")
                     else input.read(4096)
                 )
-                print(f"DEBUG _write_loop got {len(data)} bytes", file=sys.stderr, flush=True)  # ← 加这行
                 if not data:
                     break
-
                 self.write(data)
         except Exception as e:
             name = self.adapter_name()
