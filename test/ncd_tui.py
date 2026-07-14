@@ -117,6 +117,7 @@ def read_exact(
     *,
     stop_event: threading.Event | None = None,
     deadline: float | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> bytes:
     chunks: list[bytes] = []
     remaining = size
@@ -141,6 +142,8 @@ def read_exact(
             raise EOFError(f"device closed while reading {size} bytes")
         chunks.append(chunk)
         remaining -= len(chunk)
+        if progress is not None:
+            progress(size - remaining, size)
 
     return b"".join(chunks)
 
@@ -150,13 +153,24 @@ def read_frame(
     *,
     stop_event: threading.Event | None = None,
     timeout: float | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> bytes:
     deadline = None if timeout is None else time.monotonic() + timeout
     header = read_exact(fd, 4, stop_event=stop_event, deadline=deadline)
     payload_len = struct.unpack("!I", header)[0]
     if payload_len > MAX_FRAME_SIZE:
         raise ValueError(f"frame too large: {payload_len} bytes")
-    return read_exact(fd, payload_len, stop_event=stop_event, deadline=deadline)
+    if progress is not None:
+        # A zero-byte progress event proves that the next complete four-byte
+        # business-frame header reached the TUI, before its payload is read.
+        progress(0, payload_len)
+    return read_exact(
+        fd,
+        payload_len,
+        stop_event=stop_event,
+        deadline=deadline,
+        progress=progress,
+    )
 
 
 def write_all(fd: int, data: bytes, chunk_size: int = DEFAULT_WRITE_CHUNK_SIZE) -> None:
@@ -354,9 +368,15 @@ class DeviceSession:
         *,
         stop_event: threading.Event | None = None,
         timeout: float | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> bytes:
         with self.read_lock:
-            return read_frame(self.fileno(), stop_event=stop_event, timeout=timeout)
+            return read_frame(
+                self.fileno(),
+                stop_event=stop_event,
+                timeout=timeout,
+                progress=progress,
+            )
 
     def read_json(
         self,
@@ -431,7 +451,6 @@ class ConnectionPage(cmd.Cmd):
         self.print("Commands:")
         for line in self.command_help.strip().splitlines():
             self.print(f"  {line.strip()}")
-        self.print("  status                 show connection and data state")
         self.print("  open | close | reopen  manage only this connection")
         self.print("  back                   close it and return home")
         self.print("  help                   show this help")
@@ -648,10 +667,10 @@ class ReceiverPage(ConnectionPage):
 
 class CameraPage(ReceiverPage):
     command_help = """
-status                 show receive/save health, times and interval
-latest [OUTPUT.jpg]    show or copy the latest saved image
-capture [OUTPUT.jpg]   wait up to 10 seconds for the next image
-path                   show image and metadata locations
+status                 check whether frames are arriving and being saved
+latest [OUTPUT.jpg]    show the latest image path, or copy that image
+wait [OUTPUT.jpg]      wait for the next auto-received frame (up to 30s)
+files                  show the image and metadata locations
 """
 
     def __init__(self, *args, **kwargs):
@@ -670,6 +689,15 @@ path                   show image and metadata locations
         self.last_interval_ms: float | None = None
         self._worker_last_saved_monotonic: float | None = None
         self._worker_last_report_monotonic: float | None = None
+        self._worker_last_progress_report_monotonic: float | None = None
+        self.transport_frame_count = 0
+        self.current_frame_received = 0
+        self.current_frame_expected = 0
+        self.shared_camera_frame_count: Any | None = None
+        self.shared_camera_last_saved_epoch: Any | None = None
+        self.shared_camera_transport_frame_count: Any | None = None
+        self.shared_camera_current_received: Any | None = None
+        self.shared_camera_current_expected: Any | None = None
 
     def receiver_queue_maxsize(self) -> int:
         # Files and frames.jsonl are the authoritative history.  The queue is
@@ -683,14 +711,45 @@ path                   show image and metadata locations
         self.last_remote_sequence = None
         self._worker_last_saved_monotonic = None
         self._worker_last_report_monotonic = None
+        self._worker_last_progress_report_monotonic = None
+        if os.name == "posix" and type(self.session) is DeviceSession:
+            context = multiprocessing.get_context("fork")
+            self.shared_camera_frame_count = context.Value("Q", self.frame_count)
+            self.shared_camera_last_saved_epoch = context.Value("d", self.last_saved_epoch or 0.0)
+            self.shared_camera_transport_frame_count = context.Value(
+                "Q", self.transport_frame_count
+            )
+            self.shared_camera_current_received = context.Value("Q", 0)
+            self.shared_camera_current_expected = context.Value("Q", 0)
+        else:
+            self.shared_camera_frame_count = None
+            self.shared_camera_last_saved_epoch = None
+            self.shared_camera_transport_frame_count = None
+            self.shared_camera_current_received = None
+            self.shared_camera_current_expected = None
         super().on_open()
 
     def receiver_loop(self, stop_event: Any) -> None:
-        self.print("camera: receiving continuously; every complete frame is saved")
+        self.print("camera: auto-receive is ON; every complete frame is saved")
+        self.print("camera: use 'status' to check progress; 'wait' does not trigger a remote capture")
+        self.print(
+            "camera: progress is printed about every 5 seconds; if a large frame takes too long, "
+            "lower device width/height/jpeg_quality"
+        )
         save_failure = False
         try:
             while not stop_event.is_set():
-                payload = self.session.read_frame(stop_event=stop_event)
+                self._set_camera_read_progress(0, 0)
+                payload = self.session.read_frame(
+                    stop_event=stop_event,
+                    progress=self._report_camera_read_progress,
+                )
+                self.transport_frame_count += 1
+                if self.shared_camera_transport_frame_count is not None:
+                    with self.shared_camera_transport_frame_count.get_lock():
+                        self.shared_camera_transport_frame_count.value = (
+                            self.transport_frame_count
+                        )
                 try:
                     sequence, jpeg, digest = decode_camera_payload(payload)
                 except Exception as error:
@@ -739,6 +798,31 @@ path                   show image and metadata locations
                 self.print(f"camera RECEIVE/SAVE STOPPED: {error}", file=sys.stderr)
         finally:
             self.print("camera: receiver stopped")
+
+    def _report_camera_read_progress(self, received: int, total: int) -> None:
+        self._set_camera_read_progress(received, total)
+        now = time.monotonic()
+        if (
+            self._worker_last_progress_report_monotonic is not None
+            and now - self._worker_last_progress_report_monotonic < 5
+        ):
+            return
+        self._worker_last_progress_report_monotonic = now
+        percent = received * 100 / total if total else 100
+        self.print(
+            f"device->linux: camera assembling frame bytes={received}/{total} "
+            f"({percent:.1f}%)"
+        )
+
+    def _set_camera_read_progress(self, received: int, total: int) -> None:
+        self.current_frame_received = received
+        self.current_frame_expected = total
+        if self.shared_camera_current_received is not None:
+            with self.shared_camera_current_received.get_lock():
+                self.shared_camera_current_received.value = received
+        if self.shared_camera_current_expected is not None:
+            with self.shared_camera_current_expected.get_lock():
+                self.shared_camera_current_expected.value = total
 
     def _report_camera_save_error(self, error: Exception, byte_count: int) -> None:
         record = {
@@ -790,6 +874,7 @@ path                   show image and metadata locations
             "type": "camera_frame",
             "ok": True,
             "frame": local_number,
+            "transport_frame": self.transport_frame_count,
             "remote_sequence": sequence,
             "received_at_utc": received_at,
             "saved_at_utc": saved_at,
@@ -815,6 +900,12 @@ path                   show image and metadata locations
             self.last_saved_epoch = saved_time.timestamp()
             self.last_interval_ms = interval_ms
             self.frame_condition.notify_all()
+        if self.shared_camera_frame_count is not None:
+            with self.shared_camera_frame_count.get_lock():
+                self.shared_camera_frame_count.value = local_number
+        if self.shared_camera_last_saved_epoch is not None:
+            with self.shared_camera_last_saved_epoch.get_lock():
+                self.shared_camera_last_saved_epoch.value = saved_time.timestamp()
         self.emit_receiver_event(record)
 
         # Keep a live indication without flooding the terminal with every frame.
@@ -830,17 +921,21 @@ path                   show image and metadata locations
             )
             self.print(f"saved: OK time={saved_at} {interval} path={output}")
 
-    def do_capture(self, line):
-        """Wait for the next automatically received frame."""
+    def do_wait(self, line):
+        """Wait for the next automatically received frame; do not trigger the camera."""
         if not self.session.is_open:
             self.print("camera: connection is CLOSED; use 'open' first")
             return
         parts = shlex.split(line)
         output = Path(parts[0]) if parts else None
         self._drain_camera_events()
-        event = self._wait_camera_event(timeout=10)
+        event = self._wait_camera_event(timeout=30)
         if event is None:
-            self.print("camera: no new frame in 10 seconds; peer may be disconnected", file=sys.stderr)
+            self.print(
+                "camera: no complete new frame in 30 seconds; the peer may be disconnected, "
+                "or the JPEG is too large for the current transport throughput",
+                file=sys.stderr,
+            )
             return
         latest_path = Path(event["output"])
         latest_bytes = latest_path.read_bytes()
@@ -850,11 +945,17 @@ path                   show image and metadata locations
         else:
             self.print(f"camera: next frame was automatically saved -> {latest_path}")
 
+    def do_capture(self, line):
+        """Compatibility alias for wait."""
+        return self.do_wait(line)
+
     def do_latest(self, line):
         """Show or copy the most recently saved frame."""
         parts = shlex.split(line)
         self._drain_camera_events()
         latest_path = self.latest_path
+        if latest_path is None and (self.run_dir / "latest.jpg").exists():
+            latest_path = self.run_dir / "latest.jpg"
         latest_bytes = latest_path.read_bytes() if latest_path and latest_path.exists() else None
         if latest_path is None or latest_bytes is None:
             self.print("camera: no frame has been saved yet")
@@ -868,6 +969,7 @@ path                   show image and metadata locations
 
     def do_status(self, line):
         self._drain_camera_events()
+        self._sync_camera_shared_state()
         super().do_status(line)
         if not self.session.is_open:
             health = "CLOSED"
@@ -887,6 +989,18 @@ path                   show image and metadata locations
             f"save_errors={self.save_failures} invalid_frames={self.invalid_frames} "
             f"total_bytes={self.total_bytes}"
         )
+        if self.current_frame_expected == 0:
+            stream_stage = "waiting for next 4-byte frame header"
+        elif self.current_frame_received < self.current_frame_expected:
+            stream_stage = (
+                f"assembling payload {self.current_frame_received}/"
+                f"{self.current_frame_expected} bytes"
+            )
+        else:
+            stream_stage = f"complete payload {self.current_frame_expected} bytes"
+        self.print(
+            f"transport_frames={self.transport_frame_count} stream_stage={stream_stage}"
+        )
         self.print(
             f"last_saved_utc={self.last_saved_at_utc or 'never'} interval={interval} "
             f"latest={self.latest_path or 'none'}"
@@ -896,12 +1010,16 @@ path                   show image and metadata locations
         elif "STOPPED" in health:
             self.print("Hint: the receive worker ended; use 'reopen' and inspect ncdd/device logs.")
 
-    def do_path(self, _line):
+    def do_files(self, _line):
         self._drain_camera_events()
         self.print(f"Images:   {self.run_dir}")
         self.print(f"Latest:   {self.run_dir / 'latest.jpg'}")
         self.print(f"Metadata: {self.run_dir / 'frames.jsonl'}")
         self.print("Use 'latest OUTPUT.jpg' to make an extra copy.")
+
+    def do_path(self, line):
+        """Compatibility alias for files."""
+        return self.do_files(line)
 
     def _apply_camera_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
@@ -930,19 +1048,60 @@ path                   show image and metadata locations
     def _drain_camera_events(self) -> None:
         for event in self.drain_receiver_events():
             self._apply_camera_event(event)
+        self._sync_camera_shared_state()
+
+    def _sync_camera_shared_state(self) -> None:
+        if self.shared_camera_frame_count is not None:
+            with self.shared_camera_frame_count.get_lock():
+                shared_count = int(self.shared_camera_frame_count.value)
+            if shared_count > self.frame_count:
+                self.frame_count = shared_count
+                if (self.run_dir / "latest.jpg").exists():
+                    self.latest_path = self.run_dir / "latest.jpg"
+        if self.shared_camera_last_saved_epoch is not None:
+            with self.shared_camera_last_saved_epoch.get_lock():
+                shared_epoch = float(self.shared_camera_last_saved_epoch.value)
+            if shared_epoch > (self.last_saved_epoch or 0):
+                self.last_saved_epoch = shared_epoch
+                self.last_saved_at_utc = utc_text(
+                    datetime.fromtimestamp(shared_epoch, timezone.utc)
+                )
+        if self.shared_camera_transport_frame_count is not None:
+            with self.shared_camera_transport_frame_count.get_lock():
+                self.transport_frame_count = int(
+                    self.shared_camera_transport_frame_count.value
+                )
+        if self.shared_camera_current_received is not None:
+            with self.shared_camera_current_received.get_lock():
+                self.current_frame_received = int(
+                    self.shared_camera_current_received.value
+                )
+        if self.shared_camera_current_expected is not None:
+            with self.shared_camera_current_expected.get_lock():
+                self.current_frame_expected = int(
+                    self.shared_camera_current_expected.value
+                )
 
     def _wait_camera_event(self, timeout: float) -> dict[str, Any] | None:
+        self._sync_camera_shared_state()
+        after = self.frame_count
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
-            event = self.next_receiver_event(remaining)
-            if event is None:
-                return None
-            self._apply_camera_event(event)
-            if event.get("type") == "camera_frame":
-                return event
+            event = self.next_receiver_event(min(remaining, 0.25))
+            if event is not None:
+                self._apply_camera_event(event)
+                if event.get("type") == "camera_frame" and int(event.get("frame", 0)) > after:
+                    return event
+            self._sync_camera_shared_state()
+            if self.frame_count > after and (self.run_dir / "latest.jpg").exists():
+                return {
+                    "type": "camera_frame",
+                    "frame": self.frame_count,
+                    "output": str(self.run_dir / "latest.jpg"),
+                }
 
     def on_receiver_stopped(self) -> None:
         self._drain_camera_events()
@@ -950,14 +1109,15 @@ path                   show image and metadata locations
 
 class KeyboardPage(ReceiverPage):
     command_help = """
-send TEXT              type text in the focused app (also: send+TEXT)
-enter                  send the Enter key
-key KEY                tap a key, e.g. key left
-combo KEYS             e.g. combo ctrl+c, combo shift+a, combo command+s
-down KEY | up KEY      hold or release a modifier/key
-raw                     direct keyboard mode; Ctrl-] exits
-listen text|events|off  change display only; receiving and logging continue
-info                    explain delivery and show log files
+send TEXT              type text in the actual device's focused app
+key NAME               tap one key, e.g. key enter / key left / key a
+combo KEYS             send a shortcut, e.g. combo ctrl+c
+raw                    forward typed text and common keys; Ctrl-] exits
+show text|events|off   choose how device key events appear on Linux
+hold NAME              hold a key until 'release NAME'
+release NAME           release a held key
+status                 show local handle, receiver and event count
+info                   explain directions, delivery limits and log files
 """
 
     def __init__(self, *args, event_display: str = "text", **kwargs):
@@ -1105,23 +1265,53 @@ info                    explain delivery and show log files
         """Type text in the focused application on the actual device."""
         self.do_send(line)
 
-    def _key_action(self, action: str, line: str) -> None:
+    def _key_action(self, action: str, line: str, command_name: str | None = None) -> None:
+        label = command_name or action
         parts = shlex.split(line)
         if not parts:
-            self.print(f"usage: {action} KEY [char|special|vk]")
+            self.print(f"usage: {label} NAME [char|special|vk]")
+            return
+        if len(parts) > 2:
+            self.print(f"keyboard: {label} accepts one key only; use 'send TEXT' for words")
             return
         key = self._normalize_key(parts[0])
         key_type = parts[1] if len(parts) > 1 else infer_key_type(key)
+        try:
+            self._validate_key(key, key_type)
+        except ValueError as error:
+            self.print(f"keyboard: {error}", file=sys.stderr)
+            return
         try:
             self.send_keyboard_command({"action": action, "key_type": key_type, "key": key})
         except Exception as error:
             self.print(f"keyboard: {error}", file=sys.stderr)
 
+    @staticmethod
+    def _validate_key(key: str, key_type: str) -> None:
+        if key_type == "char":
+            if len(key) != 1:
+                raise ValueError(
+                    f"{key!r} is not one character; use 'send {key}' for text, "
+                    "or use a special name such as enter/left/ctrl"
+                )
+            return
+        if key_type == "special":
+            if key not in SPECIAL_KEYS:
+                raise ValueError(f"unknown special key {key!r}")
+            return
+        if key_type == "vk":
+            try:
+                int(key)
+            except ValueError as error:
+                raise ValueError("a vk key must be an integer key code") from error
+            return
+        raise ValueError("key type must be char, special, or vk")
+
     def do_tap(self, line):
         self._key_action("tap", line)
 
     def do_key(self, line):
-        self._key_action("tap", line)
+        self._key_action("tap", line, "key")
 
     def do_enter(self, _line):
         self._key_action("tap", "enter")
@@ -1129,8 +1319,11 @@ info                    explain delivery and show log files
     def do_press(self, line):
         self._key_action("press", line)
 
+    def do_hold(self, line):
+        self._key_action("press", line, "hold")
+
     def do_down(self, line):
-        self._key_action("press", line)
+        self.do_hold(line)
 
     def do_release(self, line):
         self._key_action("release", line)
@@ -1152,6 +1345,8 @@ info                    explain delivery and show log files
             return "special" if key in SPECIAL_KEYS else "char"
 
         try:
+            for key in keys:
+                self._validate_key(key, combo_key_type(key))
             for key in held:
                 self.send_keyboard_command(
                     {"action": "press", "key_type": combo_key_type(key), "key": key},
@@ -1177,10 +1372,10 @@ info                    explain delivery and show log files
         if sent:
             self.print(f"linux->device: combo {'+'.join(keys)} [written to NCD; no adapter ACK]")
 
-    def do_listen(self, line):
+    def do_show(self, line):
         mode = line.strip().lower()
         if mode not in {"text", "events", "off"}:
-            self.print("usage: listen text|events|off")
+            self.print("usage: show text|events|off")
             return
         self.event_display = mode
         if self.shared_event_display is not None:
@@ -1190,6 +1385,10 @@ info                    explain delivery and show log files
             f"keyboard: display={mode}; receiving and logging remain active; "
             f"received={self.keyboard_event_count} log={self.run_dir / 'events.jsonl'}"
         )
+
+    def do_listen(self, line):
+        """Compatibility alias for show."""
+        return self.do_show(line)
 
     def do_mode(self, _line):
         """Enter direct keyboard pass-through mode."""
@@ -1202,7 +1401,10 @@ info                    explain delivery and show log files
         self.do_mode(line)
 
     def _line_mode(self) -> None:
-        self.print("keyboard line mode: text sends directly; /enter, /key KEY, /combo KEYS, /exit")
+        self.print(
+            "raw fallback: each entered line is sent immediately; "
+            "/enter, /key NAME, /combo KEYS, /exit"
+        )
         while True:
             try:
                 line = input("keyboard> ")
@@ -1236,7 +1438,11 @@ info                    explain delivery and show log files
 
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
-        self.print("keyboard raw mode; Ctrl-] exits")
+        self.print(
+            "raw: printable keys, Enter, Tab, Backspace and arrows typed here are sent "
+            "immediately to the device; received device events still display; "
+            "this is not a remote shell. Ctrl-] exits."
+        )
         try:
             tty.setraw(fd)
             while True:
@@ -1287,36 +1493,40 @@ info                    explain delivery and show log files
             self.send_keyboard_command({"action": "type", "text": ch}, announce=False)
             self.print(ch, end="")
 
+    def on_receiver_stopped(self) -> None:
+        self._drain_keyboard_events()
+
     def do_status(self, line):
+        """Show local keyboard page state without sending a remote command."""
         self._drain_keyboard_events()
         super().do_status(line)
         self.print(
             f"{self.receiver_status()} display={self.event_display} "
-            f"received_events={self.keyboard_event_count} log={self.run_dir / 'events.jsonl'}"
+            f"received_events={self.keyboard_event_count}"
         )
         if self.session.is_open and not self.receiver_error and self.receiver_is_alive():
-            self.print("State: OPEN/IDLE. A quiet keyboard cannot be distinguished from a disconnected peer.")
+            self.print("State: OPEN/IDLE. A quiet keyboard may also mean that the peer disconnected.")
 
     def do_info(self, _line):
+        """Explain keyboard directions and show local log paths."""
         self._drain_keyboard_events()
-        self.print("Send log:     " + str(self.run_dir / "commands.jsonl"))
-        self.print("Receive log:  " + str(self.run_dir / "events.jsonl"))
-        self.print("Received text:" + " " + str(self.run_dir / "text.txt"))
-        self.print("'written to NCD' is not an application ACK; focus the target input box on the device.")
-        self.print("Examples: send hello | enter | combo ctrl+c | combo shift+a | combo command+s")
-
-    def on_receiver_stopped(self) -> None:
-        self._drain_keyboard_events()
+        self.print("Purpose: send Linux TUI input to the actual device's focused app.")
+        self.print("Return path: actual-device key events are shown/logged on Linux, not injected into Linux.")
+        self.print("Delivery: 'written to NCD' is not an adapter ACK; focus and OS permission still matter.")
+        self.print("These status/info values are local TUI data; no remote command is sent.")
+        self.print(f"Sent commands:   {self.run_dir / 'commands.jsonl'}")
+        self.print(f"Received events: {self.run_dir / 'events.jsonl'}")
+        self.print(f"Received text:   {self.run_dir / 'text.txt'}")
 
 
 class InstructionPage(ConnectionPage):
     command_help = """
-exec PROGRAM [ARGS...]  run a real executable, e.g. exec whoami
-win COMMAND             Windows command, e.g. win dir / win echo 12345
-unix COMMAND            Unix command, e.g. unix uname -a
-shell COMMAND           advanced; requires device allow_shell=true
-timeout MILLISECONDS    set the command timeout
-info                    show request/response logs
+run COMMAND             run one command in the actual device's detected terminal
+exec PROGRAM [ARGS...]  run an actual-device program directly (advanced)
+detect                  detect PowerShell/cmd/bash/zsh/sh again
+timeout MILLISECONDS    set how long Linux waits for one result
+status                  show the last result and local connection state
+logs                    show request, response, stdout and stderr paths
 """
 
     def __init__(self, *args, **kwargs):
@@ -1324,6 +1534,109 @@ info                    show request/response logs
         self.timeout_ms = 5000
         self.prompt = "linux->device: "
         self.last_response: dict[str, Any] | None = None
+        self.remote_system = "unknown"
+        self.terminal_kind = "unknown"
+        self.terminal_executable: str | None = None
+
+    def on_open(self) -> None:
+        self.print("instruction: each 'run' executes once on the actual device and returns its output")
+        # Protocol tests replace DeviceSession with an in-memory session and
+        # trigger detection explicitly.  Real /dev sessions auto-detect.
+        if type(self.session) is DeviceSession:
+            try:
+                self.detect_terminal()
+            except Exception as error:
+                self.print(f"instruction: terminal detection failed: {error}", file=sys.stderr)
+                self._set_terminal_help()
+
+    def _set_terminal_help(self) -> None:
+        examples = {
+            "powershell": "run Get-ChildItem    | run Get-Process | run $PSVersionTable",
+            "cmd": "run dir              | run echo 12345 | run ver",
+            "bash": "run ls -la           | run pwd | run uname -a",
+            "zsh": "run ls -la           | run pwd | run uname -a",
+            "sh": "run ls -la           | run pwd | run uname -a",
+        }
+        example = examples.get(self.terminal_kind, "run COMMAND (use 'detect' first)")
+        self.command_help = f"""
+run COMMAND             actual-device {self.terminal_kind}: {example}
+exec PROGRAM [ARGS...]  run an actual-device program directly (advanced)
+detect                  detect PowerShell/cmd/bash/zsh/sh again
+timeout MILLISECONDS    set how long Linux waits for one result
+status                  show the last result and local connection state
+logs                    show request, response, stdout and stderr paths
+"""
+        label = self.terminal_kind if self.terminal_kind != "unknown" else "instruction"
+        self.prompt = f"{label} linux->device: "
+
+    def detect_terminal(self) -> str:
+        self.terminal_kind = "unknown"
+        self.terminal_executable = None
+
+        response = self._run_request(
+            {
+                "argv": [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$PSVersionTable.PSVersion.ToString()",
+                ],
+                "purpose": "terminal_probe",
+            },
+            announce=False,
+        )
+        self.remote_system = str(response.get("system") or "unknown")
+        if response.get("ok"):
+            self.terminal_kind = "powershell"
+            self.terminal_executable = "powershell.exe"
+        elif self.remote_system.casefold() == "windows":
+            pwsh = self._run_request(
+                {
+                    "argv": [
+                        "pwsh",
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "$PSVersionTable.PSVersion.ToString()",
+                    ],
+                    "purpose": "terminal_probe",
+                },
+                announce=False,
+            )
+            if pwsh.get("ok"):
+                self.terminal_kind = "powershell"
+                self.terminal_executable = "pwsh"
+            else:
+                self.terminal_kind = "cmd"
+                self.terminal_executable = "cmd.exe"
+        else:
+            shell = self._run_request(
+                {
+                    "argv": ["/bin/sh", "-lc", "printf '%s\\n' \"${SHELL:-/bin/sh}\""],
+                    "purpose": "terminal_probe",
+                },
+                announce=False,
+            )
+            self.remote_system = str(shell.get("system") or self.remote_system)
+            shell_path = str(shell.get("stdout") or "").strip().splitlines()
+            executable = shell_path[-1] if shell_path else "/bin/sh"
+            shell_name = Path(executable).name.casefold()
+            if shell.get("ok") and shell_name in {"bash", "zsh", "sh"}:
+                self.terminal_kind = shell_name
+                self.terminal_executable = executable
+            else:
+                self.terminal_kind = "sh"
+                self.terminal_executable = "/bin/sh"
+
+        self._set_terminal_help()
+        self.print(
+            f"device->linux: detected terminal={self.terminal_kind} "
+            f"system={self.remote_system} executable={self.terminal_executable}"
+        )
+        return self.terminal_kind
 
     def _instruction_reader(self, request_id: str, result_queue: Any) -> None:
         try:
@@ -1382,43 +1695,70 @@ info                    show request/response logs
                 return response
             append_jsonl(self.run_dir / "unmatched_responses.jsonl", response)
 
-    def _run_request(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _run_request(
+        self, request: dict[str, Any], *, announce: bool = True
+    ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         value = {"id": request_id, "timeout_ms": self.timeout_ms, **request}
         append_jsonl(self.run_dir / "requests.jsonl", value)
-        self.print(f"linux->device: {summarize_instruction_request(value)} id={request_id[:8]}")
+        if announce:
+            self.print(
+                f"linux->device: {summarize_instruction_request(value)} id={request_id[:8]}"
+            )
         self.session.write_json(value)
         response = self._read_matching_response(request_id, self.timeout_ms / 1000 + 1)
 
         append_jsonl(self.run_dir / "responses.jsonl", response)
-        self.last_response = response
+        if announce:
+            self.last_response = response
         for stream in ("stdout", "stderr"):
             text = response.get(stream) or ""
             if text:
                 with (self.run_dir / f"{stream}.log").open("a", encoding="utf-8") as output:
                     output.write(text)
-        self.print(
-            f"device->linux: ok={response.get('ok')} exit={response.get('returncode')} "
-            f"system={response.get('system', 'unknown')} id={request_id[:8]}"
-        )
-        if response.get("stdout"):
-            self.print("device->linux stdout:")
-            self.print(response["stdout"], end="" if response["stdout"].endswith("\n") else "\n")
-        if response.get("stderr"):
-            self.print("device->linux stderr:", file=sys.stderr)
-            self.print(response["stderr"], end="" if response["stderr"].endswith("\n") else "\n", file=sys.stderr)
+        if announce:
+            self.print(
+                f"device->linux: ok={response.get('ok')} exit={response.get('returncode')} "
+                f"system={response.get('system', 'unknown')} id={request_id[:8]}"
+            )
+            if response.get("timed_out"):
+                self.print("device->linux: command timed out and was terminated", file=sys.stderr)
+            if response.get("stdout"):
+                self.print("device->linux stdout:")
+                self.print(
+                    response["stdout"],
+                    end="" if response["stdout"].endswith("\n") else "\n",
+                )
+            if response.get("stderr"):
+                self.print("device->linux stderr:", file=sys.stderr)
+                self.print(
+                    response["stderr"],
+                    end="" if response["stderr"].endswith("\n") else "\n",
+                    file=sys.stderr,
+                )
+            truncated = [
+                stream
+                for stream in ("stdout", "stderr")
+                if response.get(f"{stream}_truncated")
+            ]
+            if truncated:
+                self.print(
+                    f"device->linux: {'/'.join(truncated)} was truncated; "
+                    "the saved log contains the same bounded response",
+                    file=sys.stderr,
+                )
         error_text = str(response.get("stderr") or "").lower()
-        if "shell execution is disabled" in error_text:
-            self.print("Hint: use 'win ...' or 'unix ...'; 'shell' needs device option allow_shell=true.")
+        if announce and "shell execution is disabled" in error_text:
+            self.print("Hint: use 'run ...'; raw 'shell' needs device option allow_shell=true.")
         missing_program = any(
             marker in error_text
             for marker in ("no such file or directory", "winerror 2", "cannot find the file")
         )
-        if response.get("returncode") is None and missing_program:
+        if announce and response.get("returncode") is None and missing_program:
             requested = (value.get("argv") or ["executable"])[0]
             self.print(
-                f"Hint: executable {requested!r} was not found. Use 'win dir' for Windows "
-                "shell built-ins, or 'unix ...' on Unix."
+                f"Hint: executable {requested!r} was not found. Use 'run COMMAND' for "
+                "terminal built-ins, or 'exec PROGRAM' for a real executable."
             )
         return response
 
@@ -1436,7 +1776,42 @@ info                    show request/response logs
             self.print(f"instruction ERROR: {error}", file=sys.stderr)
 
     def do_run(self, line):
-        self.do_exec(line)
+        command = line[1:] if line.startswith("+") else line
+        if not command.strip():
+            self.print("usage: run COMMAND")
+            return
+        try:
+            if self.terminal_kind == "unknown" or self.terminal_executable is None:
+                self.detect_terminal()
+            if self.terminal_kind == "powershell":
+                argv = [
+                    self.terminal_executable,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command,
+                ]
+            elif self.terminal_kind == "cmd":
+                argv = [self.terminal_executable, "/d", "/s", "/c", command]
+            elif self.terminal_kind in {"bash", "zsh", "sh"}:
+                argv = [self.terminal_executable, "-lc", command]
+            else:
+                raise RuntimeError("terminal is unknown; use 'detect' or 'exec PROGRAM'")
+            self._run_request({"argv": argv, "terminal": self.terminal_kind})
+        except Exception as error:
+            self.print(f"instruction ERROR: {error}", file=sys.stderr)
+
+    def do_detect(self, _line):
+        try:
+            self.detect_terminal()
+            self.show_commands()
+        except Exception as error:
+            self.print(f"instruction ERROR: {error}", file=sys.stderr)
+
+    def do_terminal(self, line):
+        """Compatibility alias for detect."""
+        return self.do_detect(line)
 
     def do_win(self, line):
         command = line[1:] if line.startswith("+") else line
@@ -1470,10 +1845,10 @@ info                    show request/response logs
     def do_timeout(self, line):
         try:
             value = int(line)
-            if value <= 0:
+            if not 1 <= value <= 60 * 60 * 1000:
                 raise ValueError
         except ValueError:
-            self.print("usage: timeout POSITIVE_MILLISECONDS")
+            self.print("usage: timeout MILLISECONDS  (1..3600000)")
             return
         self.timeout_ms = value
         self.print(f"instruction timeout={value}ms")
@@ -1490,22 +1865,29 @@ info                    show request/response logs
         if self.session.is_open:
             self.print("Remote liveness is verified only when a matched response arrives.")
 
-    def do_info(self, _line):
+    def do_logs(self, _line):
         self.print(f"Requests:  {self.run_dir / 'requests.jsonl'}")
         self.print(f"Responses: {self.run_dir / 'responses.jsonl'}")
         self.print(f"stdout:    {self.run_dir / 'stdout.log'}")
         self.print(f"stderr:    {self.run_dir / 'stderr.log'}")
-        self.print("Use 'win' for a Windows device and 'unix' for a Unix-like device.")
+        self.print(
+            f"Detected: system={self.remote_system} terminal={self.terminal_kind} "
+            f"executable={self.terminal_executable}"
+        )
+
+    def do_info(self, line):
+        """Compatibility alias for logs."""
+        return self.do_logs(line)
 
 
 class FilePage(ReceiverPage):
     command_help = """
-read                   display the latest snapshot (truncated when large)
-write TEXT             append text and verify the returned snapshot (also: write+TEXT)
-save [OUTPUT]          copy the complete latest snapshot
-writefile PATH         append a local Linux file
-info                   show snapshot details and saved paths
-reopen                 request a fresh initial snapshot
+show                   preview the latest actual-device file snapshot
+append TEXT            append text to that file and verify the new snapshot
+push PATH              append a Linux local file's bytes to that file
+save [OUTPUT]          copy the complete latest snapshot on Linux
+status                 show receiver state and latest snapshot
+info                   show file purpose, hash, time and log paths
 """
 
     def __init__(self, *args, **kwargs):
@@ -1524,6 +1906,8 @@ reopen                 request a fresh initial snapshot
     def on_open(self) -> None:
         previous = self.snapshot_count
         self.latest_snapshot = None
+        self.print("file: monitors one configured actual-device file; changes return as full snapshots")
+        self.print("file: append/push add bytes to its end; this page is not a general file manager")
         super().on_open()
         # The existing adapter always emits its current file once on open.
         # Waiting here removes the race between that initial snapshot and an
@@ -1532,9 +1916,9 @@ reopen                 request a fresh initial snapshot
             self._wait_snapshot(after=previous, timeout=5)
         except TimeoutError as error:
             raise RuntimeError(
-                "no initial file snapshot. The device-side FileAdapter likely did not start. "
-                "Set [device.options] file_path for the file device (port 8000); "
-                "see test/README.md."
+                "no initial file snapshot. The device may still be running an older bundled "
+                "FileAdapter that exits when file_path is empty. Rebuild/reinstall device-side "
+                "ncd, or set options.file_path explicitly; see test/README.md."
             ) from error
 
     def receiver_loop(self, stop_event: Any) -> None:
@@ -1564,7 +1948,7 @@ reopen                 request a fresh initial snapshot
                     f"device->linux: file snapshot={self.snapshot_count} bytes={len(data)} "
                     f"sample={data[:16].hex()}..."
                 )
-                self.print(f"saved: OK time={record['saved_at_utc']} path={output}; use 'read' to view")
+                self.print(f"saved: OK time={record['saved_at_utc']} path={output}; use 'show' to view")
         except OperationCancelled:
             pass
         except Exception as error:
@@ -1635,11 +2019,11 @@ reopen                 request a fresh initial snapshot
         if not confirmed:
             raise RuntimeError("a new snapshot arrived, but its suffix does not match the sent payload")
         self.print(
-            f"device->linux: write confirmed by returned snapshot bytes={len(payload)} "
+            f"device->linux: append confirmed by returned snapshot bytes={len(payload)} "
             f"sha256={record['sha256'][:12]}"
         )
 
-    def do_cat(self, _line):
+    def do_show(self, _line):
         try:
             data = self._latest_data()
             limit = 4096
@@ -1656,9 +2040,14 @@ reopen                 request a fresh initial snapshot
             self.print(f"file: {error}", file=sys.stderr)
 
     def do_read(self, line):
-        self.do_cat(line)
+        """Compatibility alias for show."""
+        return self.do_show(line)
 
-    def do_pull(self, line):
+    def do_cat(self, line):
+        """Compatibility alias for show."""
+        return self.do_show(line)
+
+    def do_save(self, line):
         parts = shlex.split(line)
         try:
             data = self._latest_data()
@@ -1668,34 +2057,41 @@ reopen                 request a fresh initial snapshot
         except Exception as error:
             self.print(f"file: {error}", file=sys.stderr)
 
-    def do_save(self, line):
-        self.do_pull(line)
+    def do_pull(self, line):
+        """Compatibility alias for save."""
+        return self.do_save(line)
 
     def do_append(self, line):
+        text = line[1:] if line.startswith("+") else line
+        if not text:
+            self.print("usage: append TEXT  or  append+TEXT")
+            return
         try:
-            self._append(line.encode("utf-8"))
+            self._append(text.encode("utf-8"))
         except Exception as error:
             self.print(f"file: {error}", file=sys.stderr)
 
     def do_write(self, line):
-        text = line[1:] if line.startswith("+") else line
-        if not text:
-            self.print("usage: write TEXT  or  write+TEXT")
-            return
-        self.do_append(text)
+        """Compatibility alias for append."""
+        return self.do_append(line)
 
-    def do_appendfile(self, line):
+    def do_push(self, line):
         parts = shlex.split(line)
         if len(parts) != 1:
-            self.print("usage: appendfile PATH")
+            self.print("usage: push PATH")
             return
         try:
             self._append(Path(parts[0]).read_bytes())
         except Exception as error:
             self.print(f"file: {error}", file=sys.stderr)
 
+    def do_appendfile(self, line):
+        """Compatibility alias for push."""
+        return self.do_push(line)
+
     def do_writefile(self, line):
-        self.do_appendfile(line)
+        """Compatibility alias for push."""
+        return self.do_push(line)
 
     def do_stat(self, _line):
         try:
@@ -1706,6 +2102,8 @@ reopen                 request a fresh initial snapshot
 
     def do_info(self, _line):
         self._drain_snapshots()
+        self.print("Purpose: mirror one configured actual-device file as full snapshots.")
+        self.print("append/push add bytes at the end; they do not overwrite or choose another remote path.")
         if self.latest_snapshot_record is None:
             self.print("Latest snapshot: none")
         else:
@@ -1716,7 +2114,7 @@ reopen                 request a fresh initial snapshot
             )
             self.print(f"Saved file:      {record.get('output')}")
         self.print(f"Snapshot history: {self.run_dir / 'snapshots.jsonl'}")
-        self.print(f"Write history:    {self.run_dir / 'appends.jsonl'}")
+        self.print(f"Append history:   {self.run_dir / 'appends.jsonl'}")
         if self.session.is_open and not self.receiver_error and self.receiver_is_alive():
             self.print("State: OPEN/IDLE. No file change is indistinguishable from a dead peer.")
 
