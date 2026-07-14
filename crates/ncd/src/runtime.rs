@@ -143,12 +143,24 @@ async fn handle_connection(mut conn: ConnHandler, mut adapter: Adapter, name: &s
                         }
                         eprintln!("[{name}] DEBUG wrote to adapter stdin");
                     }
-                    Err(ConnectionClosed::Normal) => {
+                    Err(ConnectionClosed::Normal(msgs)) => {
                         eprintln!("[{name}] NCD peer disconnected (normal)");
+                        for data in msgs {
+                            if let Err(e) = adapter.write(&data).await {
+                                eprintln!("[{name}] Write remaining data to adapter failed: {e}");
+                                break;
+                            }
+                        }
                         break;
                     }
-                    Err(ConnectionClosed::Error(e)) => {
+                    Err(ConnectionClosed::Error(msgs, e)) => {
                         eprintln!("[{name}] NCD peer closed: {e}");
+                        for data in msgs {
+                            if let Err(e) = adapter.write(&data).await {
+                                eprintln!("[{name}] Write remaining data to adapter failed: {e}");
+                                break;
+                            }
+                        }
                         break;
                     }
                     Err(e) => {
@@ -190,12 +202,17 @@ async fn handle_connection(mut conn: ConnHandler, mut adapter: Adapter, name: &s
                         break;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         Ok(Err(e)) => eprintln!("[{name}] Close error: {e}"),
         Err(e) => eprintln!("[{name}] Close error: {e}"),
     }
+
+    // Give the adapter time to process any data written to its stdin
+    // before killing it. Short-lived connections (e.g. short file writes)
+    // are especially sensitive to this — the adapter needs a moment to
+    // flush its output and write to disk.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Cleanup.
     let _ = adapter.kill().await;

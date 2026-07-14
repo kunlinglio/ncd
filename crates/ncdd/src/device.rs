@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+use libncd_runtime::error::ConnectionClosed;
 use libncd_runtime::OpenParams;
 use libncd_runtime::{self, ConnHandler};
 
@@ -119,6 +120,16 @@ async fn connection_run(
                         }
                     }
                     Err(e) => {
+                        // Forward any remaining messages captured in the error.
+                        match &e {
+                            ConnectionClosed::Normal(msgs)
+                            | ConnectionClosed::Error(msgs, _) => {
+                                for msg in msgs {
+                                    let _ = data_tx.send((minor, msg.clone()));
+                                }
+                            }
+                            _ => {}
+                        }
                         eprintln!("Device {} read error: {:?}", minor, e);
                         break;
                     }
@@ -157,5 +168,14 @@ async fn connection_run(
             }
         }
     }
-    // If we broke out of the loop (read error), conn is dropped here
+    // Best-effort graceful close: send ControlClose and drain remaining data.
+    match libncd_runtime::close(conn).await {
+        Ok(Ok(remaining)) => {
+            for msg in remaining {
+                let _ = data_tx.send((minor, msg));
+            }
+        }
+        Ok(Err(e)) => eprintln!("Device {} close error: {:?}", minor, e),
+        Err(e) => eprintln!("Device {} close error: {:?}", minor, e),
+    }
 }

@@ -96,7 +96,7 @@ mod tests {
         match result {
             Ok(Ok(_)) => {}
             Ok(Err(ConnectionError::PeerClosed)) => {}
-            Err(ConnectionClosed::Error(ConnectionError::PeerClosed)) => {}
+            Err(ConnectionClosed::Error(_, ConnectionError::PeerClosed)) => {}
             other => {
                 other.unwrap().unwrap();
             }
@@ -153,7 +153,7 @@ mod tests {
         let read_res = device.read().await;
         assert!(matches!(
             read_res,
-            Err(ConnectionClosed::Error(ConnectionError::PeerClosed))
+            Err(ConnectionClosed::Error(_, ConnectionError::PeerClosed))
         ));
     }
     #[tokio::test]
@@ -165,7 +165,7 @@ mod tests {
         let read_res = device.read().await;
         assert!(matches!(
             read_res,
-            Err(ConnectionClosed::Error(ConnectionError::PeerClosed))
+            Err(ConnectionClosed::Error(_, ConnectionError::PeerClosed))
         ));
         // device close first
         let (host, mut device) = gen_conn_handlers().await;
@@ -174,7 +174,7 @@ mod tests {
         let read_res = device.read().await;
         assert!(matches!(
             read_res,
-            Err(ConnectionClosed::Error(ConnectionError::PeerClosed))
+            Err(ConnectionClosed::Error(_, ConnectionError::PeerClosed))
         ));
         // both closed
         // Test multiple times to avoid random failures due to race conditions in closing
@@ -191,11 +191,11 @@ mod tests {
             let res = tokio::join!(host_close, device_close);
             match (res.0.unwrap(), res.1.unwrap()) {
                 (Ok(Ok(_)), Ok(Err(ConnectionError::PeerClosed)))
-                | (Ok(Ok(_)), Err(ConnectionClosed::Error(ConnectionError::PeerClosed))) => {}
+                | (Ok(Ok(_)), Err(ConnectionClosed::Error(_, ConnectionError::PeerClosed))) => {}
                 (Ok(Err(ConnectionError::PeerClosed)), Ok(Ok(_)))
-                | (Err(ConnectionClosed::Error(ConnectionError::PeerClosed)), Ok(Ok(_))) => {}
-                (Ok(Ok(_)), Err(ConnectionClosed::Normal)) => {}
-                (Err(ConnectionClosed::Normal), Ok(Ok(_))) => {}
+                | (Err(ConnectionClosed::Error(_, ConnectionError::PeerClosed)), Ok(Ok(_))) => {}
+                (Ok(Ok(_)), Err(ConnectionClosed::Normal(_))) => {}
+                (Err(ConnectionClosed::Normal(_)), Ok(Ok(_))) => {}
                 (Ok(Ok(_)), Ok(Ok(_))) => {}
                 other => panic!("Unexpected close result: {other:?}"),
             }

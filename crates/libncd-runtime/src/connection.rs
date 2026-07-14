@@ -563,7 +563,7 @@ impl Drop for ConnHandler {
 enum TaskState {
     Uninitialized,
     Running(tokio::task::JoinHandle<Result<(), ConnectionError>>),
-    Finished(Result<(), ConnectionError>),
+    Finished(ConnectionClosed),
 }
 
 impl ConnHandler {
@@ -599,19 +599,24 @@ impl ConnHandler {
             TaskState::Running(handle) => {
                 if handle.is_finished() {
                     let res = handle.await.expect("Join should not be failed");
-                    self.task_handle = TaskState::Finished(res.clone());
-                    match res {
-                        Ok(()) => Some(ConnectionClosed::Normal),
-                        Err(e) => Some(ConnectionClosed::Error(e.clone())),
+                    // Drain any remaining messages from the channel before caching.
+                    let mut messages = Vec::new();
+                    while let Ok(packet) = self.packet_response_rx.try_recv() {
+                        if let Packet::Data(data) = packet {
+                            messages.push(data);
+                        }
                     }
+                    let closed = match res {
+                        Ok(()) => ConnectionClosed::Normal(messages),
+                        Err(e) => ConnectionClosed::Error(messages, e),
+                    };
+                    self.task_handle = TaskState::Finished(closed.clone());
+                    Some(closed)
                 } else {
                     None
                 }
             }
-            TaskState::Finished(res) => match res {
-                Ok(()) => Some(ConnectionClosed::Normal),
-                Err(e) => Some(ConnectionClosed::Error(e.clone())),
-            },
+            TaskState::Finished(closed) => Some(closed.clone()),
         }
     }
 
@@ -657,7 +662,12 @@ impl ConnHandler {
     ) -> Result<Result<Vec<Vec<u8>>, ConnectionError>, ConnectionClosed> {
         let state = self.check_task_state().await;
         if let Some(closed) = state {
-            return Err(closed);
+            // Task already finished; messages were drained by check_task_state().
+            return match closed {
+                ConnectionClosed::Normal(msgs) => Ok(Ok(msgs)),
+                ConnectionClosed::Error(msgs, _) => Ok(Ok(msgs)),
+                ConnectionClosed::Unknown(s) => Err(ConnectionClosed::Unknown(s)),
+            };
         }
         self.request_tx
             .send(Request::Close)
@@ -667,28 +677,34 @@ impl ConnHandler {
         match &mut self.task_handle {
             TaskState::Running(handle) => {
                 let res = handle.await.expect("Join should not be failed");
-                self.task_handle = TaskState::Finished(res.clone());
-                if let Err(e) = res {
-                    return Ok(Err(e.clone()));
+                // Drain remaining messages before caching the result.
+                let mut messages = Vec::new();
+                while let Ok(packet) = self.packet_response_rx.try_recv() {
+                    if let Packet::Data(data) = packet {
+                        messages.push(data);
+                    }
+                }
+                let closed = match res {
+                    Ok(()) => ConnectionClosed::Normal(messages),
+                    Err(e) => ConnectionClosed::Error(messages, e),
+                };
+                self.task_handle = TaskState::Finished(closed);
+                // Re-read to return messages (avoid clone of large Vec).
+                match &self.task_handle {
+                    TaskState::Finished(ConnectionClosed::Normal(msgs)) => Ok(Ok(msgs.clone())),
+                    TaskState::Finished(ConnectionClosed::Error(msgs, _)) => Ok(Ok(msgs.clone())),
+                    _ => unreachable!(),
                 }
             }
-            TaskState::Finished(res) => {
-                if let Err(e) = res {
-                    return Ok(Err(e.clone()));
-                }
-            }
+            TaskState::Finished(closed) => match closed {
+                ConnectionClosed::Normal(msgs) => Ok(Ok(msgs.clone())),
+                ConnectionClosed::Error(msgs, _) => Ok(Ok(msgs.clone())),
+                ConnectionClosed::Unknown(s) => Err(ConnectionClosed::Unknown(s.clone())),
+            },
             TaskState::Uninitialized => {
                 unreachable!("Task should be initialized before calling close")
             }
-        };
-        // Packed and returned all messages in packet_response_rx
-        let mut messages = Vec::new();
-        while let Ok(packet) = self.packet_response_rx.try_recv() {
-            if let Packet::Data(data) = packet {
-                messages.push(data);
-            }
         }
-        return Ok(Ok(messages));
     }
 }
 

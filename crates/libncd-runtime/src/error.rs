@@ -27,11 +27,13 @@ impl From<std::io::Error> for ConnectionCreateError {
 
 #[derive(Debug, Error, Clone)]
 pub enum ConnectionClosed {
+    /// Closed normally with any remaining unread messages.
     #[error("Closed normally")]
-    Normal,
+    Normal(Vec<Vec<u8>>),
 
-    #[error("Closed due to error: {0}")]
-    Error(#[from] ConnectionError),
+    /// Closed due to an error, with any remaining unread messages.
+    #[error("Closed due to error: {1}")]
+    Error(Vec<Vec<u8>>, ConnectionError),
 
     #[error("Unknown error: {0}")]
     Unknown(String),
