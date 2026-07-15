@@ -13,6 +13,8 @@ DEVICE = sys.argv[1] if len(sys.argv) > 1 else "/dev/ncd_camera"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
 
 latest_frame = b""
+frame_seq = 0            # increments each time reader() delivers a new frame
+frame_ready = threading.Event()
 lock = threading.Lock()
 
 
@@ -36,28 +38,44 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 
     def _send_stream(self):
         self.send_response(200)
-        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Content-Type",
+                         "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control",
+                         "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("Expires", "0")
         self.end_headers()
+
+        last_seq = -1
         while True:
+            frame_ready.wait()                  # block until a new frame arrives
             with lock:
+                seq = frame_seq
                 frame = latest_frame
-            if frame:
+            frame_ready.clear()
+
+            if not frame or seq == last_seq:
+                continue
+
+            last_seq = seq
+            try:
                 self.wfile.write(b"--frame\r\n")
-                self.wfile.write(b"Content-Type: image/jpeg\r\n\r\n")
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(frame)}\r\n".encode())
+                self.wfile.write(b"\r\n")
                 self.wfile.write(frame)
                 self.wfile.write(b"\r\n")
-                # flush each frame so the browser renders in real time
-                try:
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    break
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
 
     def log_message(self, fmt, *args):
         pass  # suppress access logs
 
 
 def reader():
-    global latest_frame
+    global latest_frame, frame_seq
     fd = os.open(DEVICE, os.O_RDONLY)
     while True:
         raw = os.read(fd, 4)
@@ -70,6 +88,8 @@ def reader():
             jpg += chunk
         with lock:
             latest_frame = jpg
+            frame_seq += 1
+        frame_ready.set()
 
 
 threading.Thread(target=reader, daemon=True).start()
